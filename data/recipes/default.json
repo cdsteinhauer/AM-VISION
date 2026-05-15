@@ -1,0 +1,54 @@
+{
+  "name": "default",
+  "description": "Default rectangular part inspection",
+  "tools": [
+    {
+      "id": "part_rect",
+      "name": "Part rectangle",
+      "type": "ai_classifier",
+      "roi": [
+        0.15,
+        0.15,
+        0.7,
+        0.7
+      ],
+      "enabled": false,
+      "min_width_mm": 20.0,
+      "max_width_mm": 1000.0,
+      "min_height_mm": 20.0,
+      "max_height_mm": 1000.0,
+      "min_edge_score": 25.0,
+      "min_length_mm": null,
+      "max_length_mm": null,
+      "line_orientation": null,
+      "debug": false,
+      "min_line_length_ratio": 0.15,
+      "model_dir": "data/models/pass_fail_classifier",
+      "min_confidence": 0.8
+    },
+    {
+      "id": "ai_classifier_1778877195938",
+      "name": "AI classifier",
+      "type": "ai_classifier",
+      "roi": [
+        0.6264,
+        0.2,
+        0.0956,
+        0.1614
+      ],
+      "enabled": true,
+      "min_width_mm": null,
+      "max_width_mm": null,
+      "min_height_mm": null,
+      "max_height_mm": null,
+      "min_edge_score": 25.0,
+      "min_length_mm": null,
+      "max_length_mm": null,
+      "line_orientation": null,
+      "debug": false,
+      "min_line_length_ratio": 0.15,
+      "model_dir": "data/models/pass_fail_classifier",
+      "min_confidence": 0.6
+    }
+  ]
+}

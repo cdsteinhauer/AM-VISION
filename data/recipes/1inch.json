@@ -1,0 +1,28 @@
+{
+  "name": "1inch",
+  "description": "1 x 1 inch part",
+  "tools": [
+    {
+      "id": "rectangle_1778791679135",
+      "name": "Rectangle check",
+      "type": "rectangle",
+      "roi": [
+        0.6287,
+        0.2315,
+        0.076,
+        0.1299
+      ],
+      "enabled": true,
+      "min_width_mm": 40.0,
+      "max_width_mm": 80.0,
+      "min_height_mm": 20.0,
+      "max_height_mm": 50.0,
+      "min_edge_score": 25.0,
+      "min_length_mm": null,
+      "max_length_mm": null,
+      "line_orientation": null,
+      "debug": true,
+      "min_line_length_ratio": 0.15
+    }
+  ]
+}

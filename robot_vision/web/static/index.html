@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Robot Vision</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260515-ai-confidence-percent" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Robot Vision</h1>
+        <p>Astra part inspection workcell</p>
+      </div>
+      <div class="status-strip">
+        <span id="healthStatus">Service: checking</span>
+        <span id="cameraStatus">Camera: unknown</span>
+        <span id="resultStatus">Result: idle</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="viewer">
+        <div class="viewer-header">
+          <div class="tabs">
+            <button class="tab active" data-view="rgb">RGB</button>
+            <button class="tab" data-view="depth">Depth</button>
+          </div>
+          <div class="actions">
+            <div class="mode-tabs" aria-label="Capture mode">
+              <button class="mode-tab active" data-mode="live">Live View</button>
+              <button class="mode-tab" data-mode="capture">Live Capture</button>
+              <button class="mode-tab" data-mode="snap">Snap Capture</button>
+            </div>
+            <button id="snapButton">Snap</button>
+            <button id="inspectButton" class="primary">Inspect</button>
+            <label class="toggle"><input id="autoSnap" type="checkbox" /> Auto</label>
+            <div class="zoom-controls" aria-label="Image zoom">
+              <button id="zoomOutButton">-</button>
+              <span id="zoomValue">100%</span>
+              <button id="zoomInButton">+</button>
+              <button id="zoomResetButton">Reset</button>
+            </div>
+          </div>
+        </div>
+        <div class="image-stage">
+          <img id="rgbImage" alt="RGB camera frame" />
+          <img id="depthImage" alt="Depth camera frame" hidden />
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <nav class="panel-tabs" aria-label="Settings panels">
+          <button class="panel-tab active" data-panel="recipePanel">Recipe</button>
+          <button class="panel-tab" data-panel="toolsPanel">Tools</button>
+          <button class="panel-tab" data-panel="calibrationPanel">Calibration</button>
+          <button class="panel-tab" data-panel="cameraPanel">Camera</button>
+          <button class="panel-tab" data-panel="resultPanel">Result</button>
+          <button class="panel-tab" data-panel="reportsPanel">Reports</button>
+          <button class="panel-tab" data-panel="trainingPanel">HF Train</button>
+        </nav>
+
+        <section id="recipePanel" class="panel-page active">
+          <h2>Recipe</h2>
+          <div class="field-row">
+            <select id="recipeSelect"></select>
+            <button id="saveRecipeButton">Save</button>
+            <button id="deleteRecipeButton" class="danger">Delete</button>
+          </div>
+          <label>Name <input id="recipeName" value="default" /></label>
+          <label>Description <input id="recipeDescription" value="Default rectangular part inspection" /></label>
+        </section>
+
+        <section id="toolsPanel" class="panel-page">
+          <h2>Tools</h2>
+          <div id="toolList"></div>
+          <button id="addRectangleTool">Add Rectangle Tool</button>
+          <button id="addEdgeOneTool">Add Edge Check 1 Edge</button>
+          <button id="addEdgeTwoTool">Add Edge Check 2 Edge</button>
+          <button id="addAiTool">Add AI Classifier Tool</button>
+          <div class="field-row">
+            <button id="debugDetectButton" class="primary">Debug Detect</button>
+            <label class="inline-toggle"><input id="liveDebug" type="checkbox" /> Live debug</label>
+          </div>
+          <p class="help-text">Debug Detect runs inspection without saving a report. Enable tool Debug lines to show candidate line detections in blue.</p>
+        </section>
+
+        <section id="calibrationPanel" class="panel-page">
+          <h2>Calibration</h2>
+          <p class="help-text">Calibration is separate from recipe tools. Set this search area around a known rectangular target, enter its real size, then detect and save scale.</p>
+          <div class="tool-grid">
+            <label>Search X <input id="calRoiX" type="number" step="0.01" value="0.2" /></label>
+            <label>Search Y <input id="calRoiY" type="number" step="0.01" value="0.2" /></label>
+            <label>Search W <input id="calRoiW" type="number" step="0.01" value="0.6" /></label>
+            <label>Search H <input id="calRoiH" type="number" step="0.01" value="0.6" /></label>
+          </div>
+          <div class="grid2">
+            <label>Pixel W <input id="pixelWidth" type="number" value="800" /></label>
+            <label>Pixel H <input id="pixelHeight" type="number" value="500" /></label>
+            <label>Real W mm <input id="realWidth" type="number" value="400" /></label>
+            <label>Real H mm <input id="realHeight" type="number" value="250" /></label>
+          </div>
+          <div class="field-row">
+            <button id="detectCalibrationButton" class="primary">Detect & Save Calibration</button>
+            <button id="calibrateButton">Save Manual Pixels</button>
+          </div>
+          <p class="help-text" id="calibrationStatus">Orange: search area. Blue: detected calibration rectangle.</p>
+        </section>
+
+        <section id="cameraPanel" class="panel-page">
+          <h2>Camera Settings</h2>
+          <div id="cameraSettings" class="settings-list">Loading camera settings...</div>
+          <div class="field-row">
+            <button id="refreshCameraSettingsButton">Refresh</button>
+            <button id="applyCameraSettingsButton" class="primary">Apply</button>
+          </div>
+        </section>
+
+        <section id="resultPanel" class="panel-page">
+          <h2>Inspection Result</h2>
+          <pre id="resultBox">No inspection yet.</pre>
+        </section>
+
+        <section id="reportsPanel" class="panel-page">
+          <h2>Reports</h2>
+          <div id="reportList" class="report-list"></div>
+        </section>
+
+        <section id="trainingPanel" class="panel-page">
+          <h2>Hugging Face Trainer</h2>
+          <p class="help-text">Train a PASS/FAIL image classifier from saved inspection reports. Training requires optional dependencies installed with <code>python -m pip install -e ".[train]"</code>.</p>
+          <p class="help-text" id="trainingDepsStatus">Checking training dependencies...</p>
+          <h3>Guided Capture</h3>
+          <label>Dataset <input id="trainDataset" value="default_part" /></label>
+          <div class="field-row">
+            <button id="capturePassButton" class="primary">Snap PASS Sample</button>
+            <button id="captureFailButton" class="danger">Snap FAIL Sample</button>
+            <button id="refreshDatasetsButton">Refresh Datasets</button>
+          </div>
+          <p class="help-text" id="captureStatus">Capture labeled samples, then train from captures.</p>
+          <div class="metric-grid">
+            <div><strong id="trainTotal">0</strong><span>Total</span></div>
+            <div><strong id="trainPass">0</strong><span>PASS</span></div>
+            <div><strong id="trainFail">0</strong><span>FAIL</span></div>
+          </div>
+          <label>Training source <select id="trainSource">
+            <option value="captures">guided captures</option>
+            <option value="reports">saved reports</option>
+          </select></label>
+          <label>Recipe filter <input id="trainRecipe" placeholder="blank = all recipes" /></label>
+          <label>Base model <input id="trainModel" value="microsoft/resnet-18" /></label>
+          <label>Output folder <input id="trainOutput" value="data/models/pass_fail_classifier" /></label>
+          <div class="grid2">
+            <label>Epochs <input id="trainEpochs" type="number" step="1" value="5" /></label>
+            <label>Batch <input id="trainBatch" type="number" step="1" value="8" /></label>
+            <label>Val fraction <input id="trainValFraction" type="number" step="0.05" value="0.2" /></label>
+            <label>LR <input id="trainLearningRate" type="number" step="0.00001" value="0.00005" /></label>
+          </div>
+          <div class="field-row">
+            <button id="refreshTrainingButton">Refresh Samples</button>
+            <button id="startTrainingButton" class="primary">Start Training</button>
+            <button id="deleteSamplesButton" class="danger">Delete All Samples</button>
+          </div>
+          <p class="help-text" id="trainingStatus">Training: idle</p>
+          <pre id="trainingBox">No training job yet.</pre>
+        </section>
+      </aside>
+    </main>
+
+    <script src="/static/app.js?v=20260515-ai-confidence-percent"></script>
+  </body>
+</html>

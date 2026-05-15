@@ -1,0 +1,10 @@
+{
+  "name": "default",
+  "pixels_per_mm_x": 0.86,
+  "pixels_per_mm_y": 0.8666666666666667,
+  "source": "calibration-plate",
+  "pixel_width": 86,
+  "pixel_height": 52,
+  "real_width_mm": 100.0,
+  "real_height_mm": 60.0
+}

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Start Robot Vision
+Comment=Start the Robot Vision inspection app
+Exec=/home/csteinhauer/robot_vision/start_robot_vision.sh
+Path=/home/csteinhauer/robot_vision
+Terminal=true
+Categories=Development;Utility;

@@ -1,0 +1,54 @@
+{
+  "name": "1x2inch",
+  "description": "1 x 2 inch part",
+  "tools": [
+    {
+      "id": "edge_1_1778866749826",
+      "name": "Edge check 1 edge",
+      "type": "edge_2",
+      "roi": [
+        0.6333,
+        0.2285,
+        0.0638,
+        0.1042
+      ],
+      "enabled": false,
+      "min_width_mm": null,
+      "max_width_mm": null,
+      "min_height_mm": null,
+      "max_height_mm": null,
+      "min_edge_score": 1.0,
+      "min_length_mm": 20.0,
+      "max_length_mm": 1000.0,
+      "line_orientation": null,
+      "debug": true,
+      "min_line_length_ratio": 0.08,
+      "model_dir": "data/models/pass_fail_classifier",
+      "min_confidence": 0.8
+    },
+    {
+      "id": "ai_classifier_1778874632418",
+      "name": "AI classifier",
+      "type": "ai_classifier",
+      "roi": [
+        0.6352,
+        0.2,
+        0.0841,
+        0.1358
+      ],
+      "enabled": true,
+      "min_width_mm": null,
+      "max_width_mm": null,
+      "min_height_mm": null,
+      "max_height_mm": null,
+      "min_edge_score": 25.0,
+      "min_length_mm": null,
+      "max_length_mm": null,
+      "line_orientation": null,
+      "debug": true,
+      "min_line_length_ratio": 0.15,
+      "model_dir": "data/models/pass_fail_classifier",
+      "min_confidence": 0.55
+    }
+  ]
+}
