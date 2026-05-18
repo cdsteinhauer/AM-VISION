@@ -1,19 +1,32 @@
+from pathlib import Path
+
 import numpy as np
 
 from robot_vision.camera.mock import MockCamera
 from robot_vision.config import CameraConfig
 from robot_vision.inspection.calibration import CalibrationProfile
-from robot_vision.inspection.engine import InspectionEngine, debug_candidate_lines, detect_parallel_line_pair, detect_rectangle_in_roi, detect_single_line
+from robot_vision.inspection.engine import (
+    InspectionEngine,
+    debug_candidate_lines,
+    detect_parallel_line_pair,
+    detect_part_outline_in_roi,
+    detect_rectangle_in_roi,
+    detect_single_line,
+)
 from robot_vision.inspection.models import InspectionRecipe, InspectionTool
 
 
 def test_default_recipe_passes_on_mock_rectangle():
     frame = MockCamera(CameraConfig(width=640, height=360)).snapshot()
-    result = InspectionEngine().inspect(frame.rgb, InspectionRecipe.default(), CalibrationProfile())
+    result = InspectionEngine().inspect(frame.rgb, InspectionRecipe.default(), CalibrationProfile(), frame.depth)
     assert result["passed"] is True
     tool = result["tools"][0]
     assert tool["measurements"]["width_px"] > 200
     assert tool["measurements"]["height_px"] > 120
+    assert tool["measurements"]["width_mm"] > 100
+    assert tool["measurements"]["min_width_mm"] == 20.0
+    assert tool["measurements"]["max_width_mm"] == 1000.0
+    assert tool["measurements"]["depth_height_mm"] > 250
     assert tool["bbox_px"] is not None
 
 
@@ -55,7 +68,7 @@ def test_rectangle_detection_finds_small_bright_rectangle_on_textured_background
     assert detection.height_px == 32
 
 
-def test_rectangle_detection_merges_split_top_and_bottom_edges():
+def test_rectangle_detection_uses_best_local_foreground_component():
     image = np.full((120, 160, 3), 55, dtype=np.uint8)
     image[40:63, 58:112] = 185
     image[67:86, 58:112] = 25
@@ -63,9 +76,52 @@ def test_rectangle_detection_merges_split_top_and_bottom_edges():
     detection = detect_rectangle_in_roi(image, (0.25, 0.2, 0.55, 0.65))
 
     assert detection is not None
-    assert detection.bbox_px == (58, 40, 111, 85)
+    assert detection.bbox_px == (58, 40, 111, 62)
     assert detection.width_px == 54
-    assert detection.height_px == 46
+    assert detection.height_px == 23
+
+
+def test_part_outline_detects_bright_part_at_training_sample_scale():
+    rng = np.random.default_rng(9)
+    noise = rng.integers(45, 80, size=(120, 160, 1), dtype=np.uint8)
+    image = np.repeat(noise, 3, axis=2)
+    image[52:78, 70:120] = 205
+
+    outline = detect_part_outline_in_roi(image, (0.35, 0.35, 0.5, 0.4))
+
+    assert outline is not None
+    assert outline.bbox_px == (70, 52, 119, 77)
+    assert 49 <= outline.long_side_px <= 51
+    assert 25 <= outline.short_side_px <= 27
+
+
+def test_part_outline_detects_dark_part_on_bright_background():
+    image = np.full((120, 160, 3), 220, dtype=np.uint8)
+    image[52:78, 70:120] = 40
+
+    outline = detect_part_outline_in_roi(image, (0.35, 0.35, 0.5, 0.4))
+
+    assert outline is not None
+    assert outline.bbox_px == (70, 52, 119, 77)
+    assert 49 <= outline.long_side_px <= 51
+    assert 25 <= outline.short_side_px <= 27
+
+
+def test_part_outline_handles_slight_rotation():
+    try:
+        import cv2
+    except Exception:
+        return
+    image = np.full((140, 180, 3), 50, dtype=np.uint8)
+    box = cv2.boxPoints(((90, 70), (52, 26), 8))
+    cv2.fillPoly(image, [box.astype(np.int32)], (205, 205, 205))
+
+    outline = detect_part_outline_in_roi(image, (0.25, 0.25, 0.6, 0.6))
+
+    assert outline is not None
+    assert 49 <= outline.long_side_px <= 55
+    assert 24 <= outline.short_side_px <= 30
+    assert abs(outline.angle_deg) >= 3
 
 
 def test_parallel_line_pair_detection_reports_average_length():
@@ -90,6 +146,38 @@ def test_single_line_detection_reports_length():
     assert line is not None
     assert line["orientation"] == "horizontal"
     assert line["length_px"] >= 75
+
+
+def test_edge_tools_measure_outline_sides():
+    image = np.full((120, 160, 3), 45, dtype=np.uint8)
+    image[52:78, 70:120] = 205
+    depth = np.full((120, 160), 900, dtype=np.float32)
+    depth[52:78, 70:120] = 600
+    calibration = CalibrationProfile(pixels_per_mm_x=1.0, pixels_per_mm_y=1.0)
+    tool = InspectionTool.from_dict({
+        "id": "edge",
+        "name": "Outline edge",
+        "type": "edge_2",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+        "line_orientation": "auto",
+        "min_edge_score": 1,
+        "min_line_length_ratio": 0.05,
+    })
+
+    result = InspectionEngine()._inspect_edge(image, tool, calibration, depth)
+
+    assert result.passed is True
+    assert result.measurements["average_length_px"] == 50.0
+    assert result.measurements["average_length_mm"] == 50.0
+    assert result.measurements["line_gap_px"] == 25.0
+    assert result.measurements["min_length_mm"] is None
+    assert result.measurements["max_length_mm"] is None
+    assert result.measurements["outline_width_mm"] == 50.0
+    assert result.measurements["outline_height_mm"] == 26.0
+    assert result.measurements["depth_object_mm"] == 600.0
+    assert result.measurements["depth_background_mm"] == 900.0
+    assert result.measurements["depth_height_mm"] == 300.0
+    assert result.measurements["outline_corners"]
 
 
 def test_debug_candidate_lines_returns_hough_candidates():
@@ -126,3 +214,79 @@ def test_ai_classifier_confidence_accepts_percent_values():
     tool = InspectionTool.from_dict({"id": "ai", "type": "ai_classifier", "min_confidence": 55})
 
     assert tool.min_confidence == 0.55
+
+
+def test_ai_classifier_min_pass_margin_accepts_percent_values():
+    tool = InspectionTool.from_dict({"id": "ai", "type": "ai_classifier", "min_pass_margin": 15})
+
+    assert tool.min_pass_margin == 0.15
+
+
+def test_ai_classifier_fails_when_pass_margin_not_met(monkeypatch):
+    frame = MockCamera(CameraConfig(width=320, height=180)).snapshot()
+
+    def fake_predict(_model_dir, _image):
+        return {"label": "PASS", "score": 0.68, "scores": {"PASS": 0.68, "FAIL": 0.62, "OTHER": 0.2}}
+
+    monkeypatch.setattr("robot_vision.training.hf_vision.predict_image", fake_predict)
+    tool = InspectionTool.from_dict({
+        "id": "ai",
+        "name": "AI check",
+        "type": "ai_classifier",
+        "min_confidence": 50,
+        "min_pass_margin": 10,
+    })
+    result = InspectionEngine()._inspect_ai_classifier(frame.rgb, tool)
+
+    assert result.passed is False
+    assert result.measurements["min_pass_margin"] == 0.1
+    assert result.measurements["ai_pass_margin"] < result.measurements["min_pass_margin"]
+
+
+def test_ai_classifier_passes_when_pass_margin_met(monkeypatch):
+    frame = MockCamera(CameraConfig(width=320, height=180)).snapshot()
+
+    def fake_predict(_model_dir, _image):
+        return {"label": "PASS", "score": 0.88, "scores": {"PASS": 0.88, "FAIL": 0.20, "OTHER": 0.12}}
+
+    monkeypatch.setattr("robot_vision.training.hf_vision.predict_image", fake_predict)
+    tool = InspectionTool.from_dict({
+        "id": "ai",
+        "name": "AI check",
+        "type": "ai_classifier",
+        "min_confidence": 50,
+        "min_pass_margin": 10,
+    })
+    result = InspectionEngine()._inspect_ai_classifier(frame.rgb, tool)
+
+    assert result.passed is True
+    assert result.measurements["ai_pass_margin"] >= result.measurements["min_pass_margin"]
+
+
+def test_tool_live_lines_round_trip():
+    tool = InspectionTool.from_dict({"id": "edge", "type": "edge_1", "live_lines": True})
+
+    assert tool.live_lines is True
+    assert tool.to_dict()["live_lines"] is True
+
+
+def test_training_samples_outline_scale_when_available():
+    try:
+        from PIL import Image
+    except Exception:
+        return
+    sample_paths = sorted(Path("data/training/1x2inch/PASS").glob("*.png"))
+    if not sample_paths:
+        return
+    roi = (0.6387, 0.2, 0.0994, 0.1509)
+
+    outlines = []
+    for path in sample_paths:
+        image = np.array(Image.open(path).convert("RGB"))
+        outline = detect_part_outline_in_roi(image, roi, min_pixels=1)
+        if outline is not None:
+            outlines.append(outline)
+
+    assert len(outlines) == len(sample_paths)
+    assert all(45 <= outline.long_side_px <= 55 for outline in outlines)
+    assert all(22 <= outline.short_side_px <= 30 for outline in outlines)

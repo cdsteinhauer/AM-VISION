@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Robot Vision</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260515-ai-confidence-percent" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260518-hf-ui-v3" />
   </head>
   <body>
     <header class="topbar">
@@ -42,6 +42,10 @@
               <button id="zoomResetButton">Reset</button>
             </div>
           </div>
+        </div>
+        <div id="inspectionBanner" class="inspection-banner idle">
+          <strong>INSPECTION IDLE</strong>
+          <span>No inspection result yet.</span>
         </div>
         <div class="image-stage">
           <img id="rgbImage" alt="RGB camera frame" />
@@ -148,7 +152,8 @@
             <option value="captures">guided captures</option>
             <option value="reports">saved reports</option>
           </select></label>
-          <label>Recipe filter <input id="trainRecipe" placeholder="blank = all recipes" /></label>
+          <label>Recipe filter <select id="trainRecipe"><option value="">All recipes</option></select></label>
+          <label>Training folder <span id="trainingFolderPath" class="help-text muted-path"></span></label>
           <label>Base model <input id="trainModel" value="microsoft/resnet-18" /></label>
           <label>Output folder <input id="trainOutput" value="data/models/pass_fail_classifier" /></label>
           <div class="grid2">
@@ -158,9 +163,10 @@
             <label>LR <input id="trainLearningRate" type="number" step="0.00001" value="0.00005" /></label>
           </div>
           <div class="field-row">
+            <button id="openTrainingFolderButton">Open Folder</button>
             <button id="refreshTrainingButton">Refresh Samples</button>
             <button id="startTrainingButton" class="primary">Start Training</button>
-            <button id="deleteSamplesButton" class="danger">Delete All Samples</button>
+            <button id="deleteSamplesButton" class="danger">Delete Samples</button>
           </div>
           <p class="help-text" id="trainingStatus">Training: idle</p>
           <pre id="trainingBox">No training job yet.</pre>
@@ -168,6 +174,6 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=20260515-ai-confidence-percent"></script>
+    <script src="/static/app.js?v=20260518-hf-ui-v3"></script>
   </body>
 </html>

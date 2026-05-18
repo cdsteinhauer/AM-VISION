@@ -23,9 +23,11 @@ class InspectionTool:
     max_length_mm: float | None = None
     line_orientation: Literal["auto", "horizontal", "vertical"] = "auto"
     debug: bool = False
+    live_lines: bool = False
     min_line_length_ratio: float = 0.15
     model_dir: str = "data/models/pass_fail_classifier"
     min_confidence: float = 0.8
+    min_pass_margin: float = 0.0
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "InspectionTool":
@@ -45,9 +47,11 @@ class InspectionTool:
             max_length_mm=_optional_float(data.get("max_length_mm")),
             line_orientation=data.get("line_orientation", "auto"),
             debug=bool(data.get("debug", False)),
+            live_lines=bool(data.get("live_lines", False)),
             min_line_length_ratio=float(data.get("min_line_length_ratio", 0.15)),
             model_dir=str(data.get("model_dir", "data/models/pass_fail_classifier")),
             min_confidence=_confidence_float(data.get("min_confidence", 0.8)),
+            min_pass_margin=_confidence_float(data.get("min_pass_margin", 0.0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -66,9 +70,11 @@ class InspectionTool:
             "max_length_mm": self.max_length_mm,
             "line_orientation": self.line_orientation,
             "debug": self.debug,
+            "live_lines": self.live_lines,
             "min_line_length_ratio": self.min_line_length_ratio,
             "model_dir": self.model_dir,
             "min_confidence": self.min_confidence,
+            "min_pass_margin": self.min_pass_margin,
         }
 
 

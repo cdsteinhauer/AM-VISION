@@ -118,6 +118,54 @@ button.small {
   padding: 10px;
 }
 
+.inspection-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-height: 44px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f7f9fa;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.inspection-banner strong {
+  flex: 0 0 auto;
+  min-width: 142px;
+  letter-spacing: 0;
+}
+
+.inspection-banner span {
+  min-width: 0;
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.inspection-banner.pass {
+  background: #eaf7ef;
+  border-bottom-color: #b8dec6;
+}
+
+.inspection-banner.pass strong {
+  color: var(--good);
+}
+
+.inspection-banner.fail {
+  background: #fdeeed;
+  border-bottom-color: #edc3bf;
+}
+
+.inspection-banner.fail strong {
+  color: var(--bad);
+}
+
+.inspection-banner.idle strong {
+  color: var(--muted);
+}
+
 .tabs,
 .mode-tabs,
 .zoom-controls,
@@ -343,6 +391,14 @@ select {
   margin: 0 0 10px;
 }
 
+.muted-path {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tool-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -436,6 +492,16 @@ pre {
   .viewer-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .inspection-banner {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .inspection-banner span {
+    white-space: normal;
   }
 
   .shell {

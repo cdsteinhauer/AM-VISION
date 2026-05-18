@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 from threading import Thread
 from threading import Lock
@@ -17,8 +19,8 @@ from robot_vision.camera import create_camera
 from robot_vision.camera.base import depth_to_display, encode_jpeg_base64, encode_png_base64
 from robot_vision.config import AppConfig, load_config
 from robot_vision.inspection.calibration import CalibrationProfile
-from robot_vision.inspection.engine import InspectionEngine, detect_rectangle_in_roi
-from robot_vision.inspection.models import InspectionRecipe
+from robot_vision.inspection.engine import InspectionEngine, debug_candidate_lines_in_roi, detect_rectangle_in_roi
+from robot_vision.inspection.models import InspectionRecipe, InspectionTool
 from robot_vision.inspection.trigger import PresenceTrigger
 from robot_vision.storage.calibration import CalibrationStore
 from robot_vision.storage.paths import DataPaths
@@ -55,6 +57,10 @@ class CalibrationDetectPayload(BaseModel):
 
 class CameraSettingsPayload(BaseModel):
     settings: dict[str, Any]
+
+
+class LineDetectPayload(BaseModel):
+    tools: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TrainingStartPayload(BaseModel):
@@ -181,6 +187,37 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "auto_trigger": trigger_result,
         }
 
+    @app.post("/api/camera/line-detect")
+    def camera_line_detect(payload: LineDetectPayload):
+        frame = _snapshot_or_error(camera, camera_lock)
+        tools = []
+        for item in payload.tools:
+            tool = InspectionTool.from_dict(item)
+            if not tool.enabled or not tool.live_lines or tool.type not in {"edge_1", "edge_2"}:
+                continue
+            detection = debug_candidate_lines_in_roi(
+                frame.rgb,
+                tool.roi,
+                tool.line_orientation,
+                tool.min_edge_score,
+                tool.min_line_length_ratio,
+                limit=8,
+            )
+            tools.append({
+                "tool_id": tool.id,
+                "name": tool.name,
+                "type": tool.type,
+                "search_area_px": detection["search_area_px"],
+                "lines": detection["lines"],
+            })
+        return {
+            "sequence": frame.sequence,
+            "timestamp": frame.timestamp,
+            "width": int(frame.rgb.shape[1]),
+            "height": int(frame.rgb.shape[0]),
+            "tools": tools,
+        }
+
     @app.get("/api/recipes")
     def list_recipes():
         return {"recipes": recipes.list_names()}
@@ -264,7 +301,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-        result = engine.inspect(frame.rgb, recipe, profile)
+        result = engine.inspect(frame.rgb, recipe, profile, frame.depth)
         report = None
         if payload.save_report:
             report = reports.save(frame.rgb, frame.depth, result, recipe.to_dict(), profile.to_dict())
@@ -296,8 +333,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/training/samples")
     def training_samples(recipe: str | None = None, dataset: str | None = None, source: str = "reports"):
-        if source == "captures" and dataset:
-            samples = collect_capture_samples(paths.training / dataset)
+        if source == "captures":
+            if dataset:
+                samples = collect_capture_samples(training_captures._dataset_path(dataset))
+            else:
+                samples = []
+                for folder in sorted(paths.training.iterdir()):
+                    if not folder.is_dir():
+                        continue
+                    dataset_samples = collect_capture_samples(folder)
+                    samples.extend(dataset_samples)
         else:
             samples = collect_report_samples(paths.reports, recipe=recipe or None)
         counts = {label: 0 for label in ID_TO_LABEL.values()}
@@ -311,6 +356,47 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "recipes": recipes_seen,
             "ready": counts["PASS"] > 0 and counts["FAIL"] > 0,
         }
+
+    @app.get("/api/training/folder")
+    def training_folder():
+        return {"path": str(paths.training)}
+
+    @app.post("/api/training/open-folder")
+    def open_training_folder(dataset: str | None = None):
+        target = paths.training
+        if dataset:
+            target = training_captures._dataset_path(dataset)
+        if not target.exists():
+            target = paths.training
+        _open_path_in_file_manager(target)
+        return {"path": str(target)}
+
+    @app.delete("/api/training/captures")
+    def delete_training_captures(confirm: str = "", dataset: str | None = None):
+        if confirm != "DELETE":
+            raise HTTPException(status_code=400, detail='Pass confirm=DELETE to delete training captures')
+        if dataset:
+            safe_name = training_captures._safe_name(dataset)
+            folder = training_captures._dataset_path(safe_name)
+            if not folder.exists():
+                return {"deleted": 0, "scope": "dataset", "dataset": safe_name, "path": str(folder)}
+            deleted = 0
+            for file in folder.rglob("*"):
+                if file.is_file():
+                    deleted += 1
+            shutil.rmtree(folder)
+            return {"deleted": deleted, "scope": "dataset", "dataset": safe_name, "path": str(folder)}
+        total_deleted = 0
+        deleted_datasets: list[str] = []
+        for folder in sorted(paths.training.iterdir()):
+            if not folder.is_dir():
+                continue
+            for file in folder.rglob("*"):
+                if file.is_file():
+                    total_deleted += 1
+            shutil.rmtree(folder)
+            deleted_datasets.append(folder.name)
+        return {"deleted": total_deleted, "scope": "all", "datasets": deleted_datasets, "path": str(paths.training)}
 
     @app.get("/api/training/datasets")
     def list_training_datasets():
@@ -472,3 +558,23 @@ def _tail_text(path: Path, limit: int = 4000) -> str:
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
     return text[-limit:]
+
+
+def _open_path_in_file_manager(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))
+        return
+    commands: list[list[str]] = [["open", str(path)]] if sys.platform == "darwin" else [
+        ["xdg-open", str(path)],
+        ["gio", "open", str(path)],
+    ]
+    for command in commands:
+        executable = command[0]
+        if not shutil.which(executable):
+            continue
+        try:
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return
+        except OSError:
+            continue
+    raise HTTPException(status_code=500, detail=f"Failed to open path: {path}")

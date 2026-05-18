@@ -51,7 +51,7 @@ def camera_check() -> None:
 def inspect_sample() -> None:
     config = _replace_camera_provider(load_config(), "mock")
     frame = create_camera(config.camera).snapshot()
-    result = InspectionEngine().inspect(frame.rgb, InspectionRecipe.default(), CalibrationProfile())
+    result = InspectionEngine().inspect(frame.rgb, InspectionRecipe.default(), CalibrationProfile(), frame.depth)
     print(json.dumps(result, indent=2))
     if not result["passed"]:
         sys.exit(1)

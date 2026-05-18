@@ -11,6 +11,12 @@ const state = {
   previewTimer: null,
   trainingTimer: null,
   lastLiveDebugAt: 0,
+  liveLines: {
+    lastDetectAt: 0,
+    sourceWidth: 0,
+    sourceHeight: 0,
+    tools: {},
+  },
   cameraSettings: null,
   dragHandle: null,
   panDrag: null,
@@ -35,6 +41,88 @@ async function api(path, options = {}) {
 
 function setStatus(id, text) {
   $(id).textContent = text;
+}
+
+function setInspectionBannerIdle(message = "No inspection result yet.") {
+  const banner = $("inspectionBanner");
+  if (!banner) return;
+  banner.className = "inspection-banner idle";
+  banner.querySelector("strong").textContent = "INSPECTION IDLE";
+  banner.querySelector("span").textContent = message;
+}
+
+function updateInspectionBanner(result, label = "Result") {
+  const banner = $("inspectionBanner");
+  if (!banner) return;
+  if (!result) {
+    setInspectionBannerIdle();
+    return;
+  }
+  const passed = Boolean(result.passed);
+  banner.className = `inspection-banner ${passed ? "pass" : "fail"}`;
+  banner.querySelector("strong").textContent = `${label.toUpperCase()}: ${passed ? "PASS" : "FAIL"}`;
+  banner.querySelector("span").textContent = inspectionBannerText(result);
+}
+
+function inspectionBannerText(result) {
+  const parts = (result.tools || []).map(toolMeasurementText).filter(Boolean);
+  if (!parts.length) return "No measured dimensions reported.";
+  return parts.slice(0, 4).join(" | ");
+}
+
+function toolMeasurementText(tool) {
+  const measurements = tool.measurements || {};
+  const name = tool.name || tool.tool_id || "Tool";
+  const width = dimensionWithRange("W", measurements.width_mm, measurements.min_width_mm, measurements.max_width_mm);
+  const height = dimensionWithRange("H", measurements.height_mm, measurements.min_height_mm, measurements.max_height_mm);
+  const depthHeight = depthHeightText(measurements);
+  if (width || height) return `${name}: ${[width, height, depthHeight].filter(Boolean).join(", ")}`;
+  const averageLength = dimensionWithRange("Len", measurements.average_length_mm, measurements.min_length_mm, measurements.max_length_mm);
+  if (averageLength) return `${name}: ${[averageLength, depthHeight].filter(Boolean).join(", ")}`;
+  const lineLength = dimensionWithRange("Len", measurements.line_length_mm, measurements.min_length_mm, measurements.max_length_mm);
+  if (lineLength) return `${name}: ${[lineLength, depthHeight].filter(Boolean).join(", ")}`;
+  if (measurements.ai_label_display) {
+    const confidence = measurements.ai_pass_confidence ?? measurements.ai_confidence;
+    return `${name}: AI ${measurements.ai_label_display} ${formatPercent(confidence)}`;
+  }
+  return `${name}: ${tool.passed ? "PASS" : "FAIL"}`;
+}
+
+function depthHeightText(measurements) {
+  if (measurements.depth_height_mm === undefined || measurements.depth_height_mm === null) return "";
+  return `Z ${formatMm(measurements.depth_height_mm)}`;
+}
+
+function dimensionWithRange(label, value, min, max) {
+  if (value === undefined || value === null || Number.isNaN(Number(value))) return "";
+  const status = dimensionLimitStatus(value, min, max);
+  return `${label} ${formatMm(value)} (${formatLimitRange(min, max)}${status ? ` ${status}` : ""})`;
+}
+
+function formatLimitRange(min, max) {
+  const hasMin = min !== undefined && min !== null && min !== "";
+  const hasMax = max !== undefined && max !== null && max !== "";
+  if (hasMin && hasMax) return `${formatMm(min)}-${formatMm(max)}`;
+  if (hasMin) return `min ${formatMm(min)}`;
+  if (hasMax) return `max ${formatMm(max)}`;
+  return "no limits";
+}
+
+function dimensionLimitStatus(value, min, max) {
+  const numericValue = Number(value);
+  if (min !== undefined && min !== null && min !== "" && numericValue < Number(min)) return "LOW";
+  if (max !== undefined && max !== null && max !== "" && numericValue > Number(max)) return "HIGH";
+  if ((min !== undefined && min !== null && min !== "") || (max !== undefined && max !== null && max !== "")) return "OK";
+  return "";
+}
+
+function formatMm(value) {
+  return `${Number(value).toFixed(2)} mm`;
+}
+
+function formatPercent(value) {
+  if (value === undefined || value === null || Number.isNaN(Number(value))) return "";
+  return `${Math.round(Number(value) * 100)}%`;
 }
 
 function updateZoom() {
@@ -211,6 +299,21 @@ async function loadRecipes(selectedName = null) {
   });
   select.value = data.recipes.includes(previous) ? previous : (data.recipes[0] || "default");
   await loadRecipe(select.value || "default");
+  updateTrainingRecipeDropdown(data.recipes);
+}
+
+function updateTrainingRecipeDropdown(recipeNames) {
+  const select = $("trainRecipe");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = `<option value="">All recipes</option>`;
+  recipeNames.forEach((name) => {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  });
+  select.value = recipeNames.includes(previous) ? previous : "";
 }
 
 async function loadRecipe(name) {
@@ -218,6 +321,7 @@ async function loadRecipe(name) {
   state.recipe = data.recipe;
   $("recipeName").value = state.recipe.name;
   $("recipeDescription").value = state.recipe.description || "";
+  setInspectionBannerIdle("Recipe loaded. Run Inspect to measure calibrated dimensions.");
   renderTools();
 }
 
@@ -225,12 +329,36 @@ function renderTools() {
   const list = $("toolList");
   list.innerHTML = "";
   (state.recipe.tools || []).forEach((tool, index) => {
+    const modelDir = tool.model_dir || "data/models/pass_fail_classifier";
+    let aiFields = "";
+    if (tool.type === "ai_classifier") {
+      aiFields = ""
+        + "<label>Min AI Conf % <input type=\"number\" step=\"1\" data-tool=\""
+        + index
+        + "\" data-field=\"min_confidence\" value=\""
+        + confidenceToPercent(tool.min_confidence ?? 0.8)
+        + "\"></label>"
+        + "<label>Min PASS Margin % <input type=\"number\" step=\"1\" data-tool=\""
+        + index
+        + "\" data-field=\"min_pass_margin\" value=\""
+        + confidenceToPercent(tool.min_pass_margin ?? 0)
+        + "\"></label>"
+        + "<label>Model Dir <input data-tool=\""
+        + index
+        + "\" data-field=\"model_dir\" value=\""
+        + modelDir
+        + "\"></label>";
+    }
+    const helpText = tool.type === "ai_classifier"
+      ? "AI classifier compares PASS confidence against FAIL (or next-best class) and only passes when margin meets the minimum."
+      : "Search area: the app detects the rectangle inside this box, then measures the detected rectangle using calibration.";
     const card = document.createElement("div");
     card.className = "tool-card";
     card.innerHTML = `
       <div class="tool-card-header">
         <button class="tool-collapse" data-toggle-tool="${index}" type="button">▾</button>
         <strong>${tool.name}</strong>
+        <button class="small" data-save-tool="${index}" type="button">Save</button>
         <button class="danger small" data-delete-tool="${index}">Delete</button>
       </div>
       <div class="tool-card-body">
@@ -242,8 +370,9 @@ function renderTools() {
         <option value="ai_classifier">AI classifier</option>
       </select></label>
       <label class="inline-toggle"><input type="checkbox" data-tool="${index}" data-field="enabled" ${tool.enabled === false ? "" : "checked"}> Tool enabled</label>
-      <label class="inline-toggle"><input type="checkbox" data-tool="${index}" data-field="debug" ${tool.debug ? "checked" : ""}> Debug lines</label>
-      <p class="help-text">Search area: the app detects the rectangle inside this box, then measures the detected rectangle using calibration.</p>
+      ${isEdgeTool(tool) ? `<label class="inline-toggle"><input type="checkbox" data-tool="${index}" data-field="debug" ${tool.debug ? "checked" : ""}> Debug lines</label>` : ""}
+      ${isEdgeTool(tool) ? `<label class="inline-toggle"><input type="checkbox" data-tool="${index}" data-field="live_lines" ${tool.live_lines ? "checked" : ""}> Live lines</label>` : ""}
+      <p class="help-text">${helpText}</p>
       <div class="tool-grid">
         <label>Search X <input type="number" step="0.01" data-tool="${index}" data-roi="0" value="${tool.roi[0]}"></label>
         <label>Search Y <input type="number" step="0.01" data-tool="${index}" data-roi="1" value="${tool.roi[1]}"></label>
@@ -270,8 +399,7 @@ function renderTools() {
         <label>Min Line Ratio <input type="number" step="0.01" data-tool="${index}" data-field="min_line_length_ratio" value="${tool.min_line_length_ratio ?? 0.15}"></label>
       </div>
       <div class="tool-grid">
-        <label>Model Dir <input data-tool="${index}" data-field="model_dir" value="${tool.model_dir ?? "data/models/pass_fail_classifier"}"></label>
-        <label>Min AI Conf % <input type="number" step="1" data-tool="${index}" data-field="min_confidence" value="${confidenceToPercent(tool.min_confidence ?? 0.8)}"></label>
+        ${tool.type === "ai_classifier" ? aiFields : `<label>Model Dir <input data-tool="${index}" data-field="model_dir" value="${modelDir}"></label>`}
       </div>
       </div>
     `;
@@ -283,6 +411,9 @@ function renderTools() {
   document.querySelectorAll("[data-delete-tool]").forEach((button) => {
     button.addEventListener("click", () => deleteTool(Number(button.dataset.deleteTool)));
   });
+  document.querySelectorAll("[data-save-tool]").forEach((button) => {
+    button.addEventListener("click", () => saveTool(Number(button.dataset.saveTool)));
+  });
   document.querySelectorAll("[data-toggle-tool]").forEach((button) => {
     button.addEventListener("click", () => toggleToolCard(Number(button.dataset.toggleTool)));
   });
@@ -290,6 +421,11 @@ function renderTools() {
     input.addEventListener("input", () => {
       readRecipeFromUi();
       state.lastResultTools = activeResultTools();
+      resetLiveLineState();
+      if (hasLiveLineTools()) {
+        refreshLiveLineOverlay(true)
+          .catch((error) => setStatus("resultStatus", `Line detect: ${error.message}`));
+      }
       drawOverlay(state.lastResultTools);
     });
   });
@@ -302,6 +438,10 @@ function toggleToolCard(index) {
   card.classList.toggle("collapsed");
   const button = card.querySelector(".tool-collapse");
   if (button) button.textContent = card.classList.contains("collapsed") ? "▸" : "▾";
+}
+
+function isEdgeTool(tool) {
+  return tool?.type === "edge_1" || tool?.type === "edge_2";
 }
 
 function confidenceToPercent(value) {
@@ -320,12 +460,18 @@ function readRecipeFromUi() {
       return;
     }
     const field = input.dataset.field;
-    if (field === "name" || field === "type" || field === "model_dir") {
+    if (field === "name" || field === "type" || field === "model_dir" || field === "line_orientation") {
       tool[field] = input.value;
+      if (field === "type" && !isEdgeTool(tool)) {
+        tool.debug = false;
+        tool.live_lines = false;
+      }
     } else if (field === "enabled") {
       tool.enabled = input.checked;
     } else if (field === "debug") {
       tool.debug = input.checked;
+    } else if (field === "live_lines") {
+      tool.live_lines = input.checked;
     } else if (field) {
       tool[field] = input.value === "" ? null : Number(input.value);
     }
@@ -347,7 +493,11 @@ async function snap() {
     $("rgbImage").src = `data:image/png;base64,${data.rgb_png}`;
     if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
     state.lastResultTools = [];
+    setInspectionBannerIdle("Snapshot captured. Run Inspect to measure calibrated dimensions.");
     drawOverlay([]);
+    if (hasLiveLineTools()) {
+      await refreshLiveLineOverlay(true);
+    }
     if ($("autoSnap").checked && data.auto_trigger.fired) {
       state.busy = false;
       await inspect();
@@ -366,6 +516,9 @@ async function preview() {
     const data = await api(`/api/camera/preview?view=${state.view}&process_trigger=${processTrigger}`);
     $("rgbImage").src = `data:image/jpeg;base64,${data.rgb_jpg}`;
     if (data.depth_jpg) $("depthImage").src = `data:image/jpeg;base64,${data.depth_jpg}`;
+    if (hasLiveLineTools()) {
+      await updateLiveLineDetection();
+    }
     if (!state.lastResultTools.length) drawOverlay([]);
     if (state.mode === "capture" && $("autoSnap").checked && data.auto_trigger.fired) {
       state.busy = false;
@@ -384,20 +537,21 @@ async function inspect() {
   if (state.busy) return;
   state.busy = true;
   try {
-  readRecipeFromUi();
-  const recipeName = state.recipe.name;
-  await saveRecipe(false, false);
-  const data = await api("/api/inspect", {
-    method: "POST",
-    body: JSON.stringify({ recipe_name: recipeName, calibration_name: "default", save_report: true }),
-  });
-  $("rgbImage").src = `data:image/png;base64,${data.rgb_png}`;
-  if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
-  $("resultBox").textContent = JSON.stringify(data.result, null, 2);
-  setStatus("resultStatus", `Result: ${data.result.passed ? "PASS" : "FAIL"}`);
-  state.lastResultTools = data.result.tools || [];
-  drawOverlay(data.result.tools || []);
-  await loadReports();
+    readRecipeFromUi();
+    const recipeName = state.recipe.name;
+    await saveRecipe(false, false);
+    const data = await api("/api/inspect", {
+      method: "POST",
+      body: JSON.stringify({ recipe_name: recipeName, calibration_name: "default", save_report: true }),
+    });
+    $("rgbImage").src = `data:image/png;base64,${data.rgb_png}`;
+    if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
+    $("resultBox").textContent = JSON.stringify(data.result, null, 2);
+    setStatus("resultStatus", `Result: ${data.result.passed ? "PASS" : "FAIL"}`);
+    updateInspectionBanner(data.result, "Result");
+    state.lastResultTools = data.result.tools || [];
+    drawOverlay(data.result.tools || []);
+    await loadReports();
   } finally {
     state.busy = false;
   }
@@ -418,11 +572,96 @@ async function debugDetect() {
     if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
     $("resultBox").textContent = JSON.stringify(data.result, null, 2);
     setStatus("resultStatus", `Debug: ${data.result.passed ? "PASS" : "FAIL"}`);
+    updateInspectionBanner(data.result, "Debug");
     state.lastResultTools = data.result.tools || [];
     drawOverlay(data.result.tools || []);
   } finally {
     state.busy = false;
   }
+}
+
+async function updateLiveLineDetection(force = false) {
+  const now = Date.now();
+  if (!force && now - state.liveLines.lastDetectAt < 450) return;
+  state.liveLines.lastDetectAt = now;
+  readRecipeFromUi();
+  const data = await api("/api/camera/line-detect", {
+    method: "POST",
+    body: JSON.stringify({ tools: liveLineTools() }),
+  });
+  state.liveLines.sourceWidth = data.width;
+  state.liveLines.sourceHeight = data.height;
+  stabilizeLiveLineTools(data.tools || [], now);
+}
+
+async function refreshLiveLineOverlay(force = false) {
+  await updateLiveLineDetection(force);
+  drawOverlay(state.lastResultTools || []);
+}
+
+function hasLiveLineTools() {
+  return liveLineTools().length > 0;
+}
+
+function liveLineTools() {
+  if (!state.recipe) return [];
+  return (state.recipe.tools || []).filter((tool) => tool.enabled !== false && tool.live_lines && isEdgeTool(tool));
+}
+
+function resetLiveLineState() {
+  state.liveLines.tools = {};
+  state.liveLines.lastDetectAt = 0;
+}
+
+function stabilizeLiveLineTools(tools, now) {
+  const activeToolIds = new Set(liveLineTools().map((tool) => tool.id));
+  const nextTools = {};
+  tools.forEach((tool) => {
+    const previous = state.liveLines.tools[tool.tool_id]?.candidates || {};
+    const nextCandidates = {};
+    const stable = [];
+    (tool.lines || []).forEach((line) => {
+      const key = liveLineKey(line);
+      const prior = previous[key] || { seen: 0 };
+      const item = {
+        ...line,
+        seen: Math.min(5, prior.seen + 1),
+        lastSeen: now,
+      };
+      nextCandidates[key] = item;
+      if (item.seen >= 2) stable.push(item);
+    });
+
+    Object.entries(previous).forEach(([key, item]) => {
+      if (nextCandidates[key] || now - item.lastSeen > 900 || item.seen < 2) return;
+      nextCandidates[key] = { ...item, seen: item.seen - 1 };
+      stable.push(nextCandidates[key]);
+    });
+
+    stable.sort((a, b) => (b.length_px || 0) - (a.length_px || 0));
+    nextTools[tool.tool_id] = {
+      ...tool,
+      candidates: nextCandidates,
+      stable: stable.slice(0, 6),
+      lastStableAt: stable.length ? now : state.liveLines.tools[tool.tool_id]?.lastStableAt || 0,
+    };
+  });
+
+  Object.entries(state.liveLines.tools).forEach(([toolId, tool]) => {
+    if (!activeToolIds.has(toolId) || nextTools[toolId] || now - tool.lastStableAt > 1400) return;
+    nextTools[toolId] = tool;
+  });
+  state.liveLines.tools = nextTools;
+}
+
+function liveLineKey(item) {
+  const line = item.line || [0, 0, 0, 0];
+  const mx = (line[0] + line[2]) / 2;
+  const my = (line[1] + line[3]) / 2;
+  if (item.orientation === "horizontal") {
+    return `h:${Math.round(my / 18)}:${Math.round(mx / 70)}`;
+  }
+  return `v:${Math.round(mx / 18)}:${Math.round(my / 70)}`;
 }
 
 function drawOverlay(tools) {
@@ -435,9 +674,22 @@ function drawOverlay(tools) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawRecipeRois(ctx, canvas.width, canvas.height);
   drawCalibrationOverlay(ctx, canvas.width, canvas.height);
+  drawLiveLineOverlay(ctx, canvas.width, canvas.height);
   ctx.lineWidth = 5;
   ctx.font = "22px Segoe UI";
   activeResultToolsFrom(tools).forEach((tool) => {
+    const outlineCorners = tool.measurements?.outline_corners || [];
+    if (outlineCorners.length >= 4) {
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = tool.passed ? "rgba(21, 150, 80, 0.85)" : "rgba(207, 52, 43, 0.85)";
+      ctx.beginPath();
+      ctx.moveTo(outlineCorners[0][0], outlineCorners[0][1]);
+      outlineCorners.slice(1).forEach((point) => ctx.lineTo(point[0], point[1]));
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
     const debugLines = tool.measurements?.debug_lines || [];
     if (debugLines.length) {
       ctx.save();
@@ -481,6 +733,26 @@ function activeResultToolsFrom(tools) {
   if (!state.recipe) return tools || [];
   const enabledIds = new Set((state.recipe.tools || []).filter((tool) => tool.enabled !== false).map((tool) => tool.id));
   return (tools || []).filter((tool) => enabledIds.has(tool.tool_id));
+}
+
+function drawLiveLineOverlay(ctx, width, height) {
+  if (state.view !== "rgb") return;
+  const sx = state.liveLines.sourceWidth ? width / state.liveLines.sourceWidth : 1;
+  const sy = state.liveLines.sourceHeight ? height / state.liveLines.sourceHeight : 1;
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(0, 210, 140, 0.88)";
+  Object.values(state.liveLines.tools).forEach((tool) => {
+    if (!tool.stable?.length || Date.now() - tool.lastStableAt > 1400) return;
+    tool.stable.forEach((candidate) => {
+      const [x0, y0, x1, y1] = candidate.line;
+      ctx.beginPath();
+      ctx.moveTo(x0 * sx, y0 * sy);
+      ctx.lineTo(x1 * sx, y1 * sy);
+      ctx.stroke();
+    });
+  });
+  ctx.restore();
 }
 
 function drawCalibrationOverlay(ctx, width, height) {
@@ -783,7 +1055,7 @@ async function loadReports() {
 }
 
 async function refreshTrainingSamples() {
-  const recipe = $("trainRecipe").value.trim();
+  const recipe = $("trainRecipe").value;
   const source = $("trainSource").value;
   const dataset = $("trainDataset").value.trim();
   const params = new URLSearchParams({ source });
@@ -794,9 +1066,10 @@ async function refreshTrainingSamples() {
   $("trainTotal").textContent = data.total;
   $("trainPass").textContent = data.counts.PASS || 0;
   $("trainFail").textContent = data.counts.FAIL || 0;
-  $("trainingStatus").textContent = data.ready
-    ? "Training data ready."
-    : "Training needs at least one PASS and one FAIL report.";
+  const readyMessage = source === "captures"
+    ? "at least one PASS and one FAIL sample in capture dataset"
+    : "at least one PASS and one FAIL report";
+  $("trainingStatus").textContent = data.ready ? "Training data ready." : `Training needs ${readyMessage}.`;
   return data;
 }
 
@@ -817,6 +1090,26 @@ async function refreshTrainingDatasets() {
   const data = await api("/api/training/datasets");
   $("captureStatus").textContent = `Datasets: ${data.datasets.map((item) => `${item.name} (${item.total})`).join(", ") || "none"}`;
   await refreshTrainingSamples();
+}
+
+async function loadTrainingFolder() {
+  const data = await api("/api/training/folder");
+  $("trainingFolderPath").textContent = `Saved to ${data.path}`;
+  return data.path;
+}
+
+async function openTrainingFolder() {
+  const params = new URLSearchParams();
+  const source = $("trainSource").value;
+  if (source === "captures") {
+    const dataset = $("trainDataset").value.trim();
+    if (dataset) params.set("dataset", dataset);
+  }
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const data = await api(`/api/training/open-folder${query}`, {
+    method: "POST",
+  });
+  $("captureStatus").textContent = `Opened training folder: ${data.path}`;
 }
 
 async function refreshTrainingStatus() {
@@ -855,13 +1148,17 @@ function renderTrainingStatus(data) {
 async function startTraining() {
   const sampleData = await refreshTrainingSamples();
   if (!sampleData.ready) {
-    $("trainingBox").textContent = "Training requires at least one PASS and one FAIL report.";
+    const source = $("trainSource").value;
+    const message = source === "captures"
+      ? "Training requires at least one PASS and one FAIL sample in capture dataset."
+      : "Training requires at least one PASS and one FAIL report.";
+    $("trainingBox").textContent = message;
     return;
   }
   const data = await api("/api/training/start", {
     method: "POST",
     body: JSON.stringify({
-      recipe: $("trainRecipe").value.trim() || null,
+      recipe: $("trainRecipe").value || null,
       dataset: $("trainDataset").value.trim() || null,
       source: $("trainSource").value,
       model: $("trainModel").value.trim() || "microsoft/resnet-18",
@@ -877,12 +1174,24 @@ async function startTraining() {
 }
 
 async function deleteAllSamples() {
-  if (!window.confirm("Delete all saved reports/training samples? This cannot be undone.")) return;
-  const data = await api("/api/reports?confirm=DELETE", { method: "DELETE" });
-  $("trainingStatus").textContent = `Deleted ${data.deleted} samples.`;
+  const source = $("trainSource").value;
+  let data;
+  if (source === "captures") {
+    const params = new URLSearchParams({ confirm: "DELETE" });
+    const dataset = $("trainDataset").value.trim();
+    if (dataset) params.set("dataset", dataset);
+    data = await api(`/api/training/captures?${params.toString()}`, {
+      method: "DELETE",
+    });
+    const scope = data.scope === "dataset" ? `dataset ${data.dataset}` : "all capture datasets";
+    $("trainingStatus").textContent = `Deleted ${data.deleted} training samples from ${scope}.`;
+  } else {
+    data = await api("/api/reports?confirm=DELETE", { method: "DELETE" });
+    $("trainingStatus").textContent = `Deleted ${data.deleted} report samples.`;
+  }
   $("trainingBox").textContent = JSON.stringify(data, null, 2);
-  await loadReports();
   await refreshTrainingSamples();
+  await loadReports();
 }
 
 function addTool(type) {
@@ -903,11 +1212,24 @@ function addTool(type) {
     max_length_mm: type === "edge_1" || type === "edge_2" ? 1000 : null,
     line_orientation: "auto",
     debug: false,
+    live_lines: false,
     min_line_length_ratio: 0.15,
     model_dir: "data/models/pass_fail_classifier",
     min_confidence: 0.8,
+    min_pass_margin: 0.0,
   });
   renderTools();
+}
+
+async function saveTool(index) {
+  if (!state.recipe || !state.recipe.tools[index]) return;
+  try {
+    await saveRecipe(false, false);
+    const recipeName = state.recipe.name;
+    $("resultBox").textContent = `Saved tool ${index + 1} in recipe ${recipeName}`;
+  } catch (error) {
+    $("resultBox").textContent = `Failed to save tool: ${error.message}`;
+  }
 }
 
 function toolDefaultName(type) {
@@ -940,6 +1262,9 @@ document.querySelectorAll(".mode-tab").forEach((button) => {
     if (state.mode === "snap") {
       setStatus("resultStatus", "Mode: Snap Capture");
       startPreviewLoop(false);
+      if (hasLiveLineTools()) {
+        refreshLiveLineOverlay(true).catch((error) => setStatus("resultStatus", `Line detect: ${error.message}`));
+      }
     } else if (state.mode === "capture") {
       setStatus("resultStatus", "Mode: Live Capture");
       startPreviewLoop(true);
@@ -1049,8 +1374,18 @@ $("capturePassButton").addEventListener("click", () => captureTrainingSample("PA
 $("captureFailButton").addEventListener("click", () => captureTrainingSample("FAIL").catch((error) => {
   $("captureStatus").textContent = `Capture FAIL failed: ${error.message}`;
 }));
+$("openTrainingFolderButton").addEventListener("click", () => openTrainingFolder().catch((error) => {
+  $("trainingStatus").textContent = `Open folder failed: ${error.message}`;
+  $("captureStatus").textContent = `Open folder failed: ${error.message}`;
+}));
 $("refreshDatasetsButton").addEventListener("click", () => refreshTrainingDatasets().catch((error) => {
   $("captureStatus").textContent = `Refresh datasets failed: ${error.message}`;
+}));
+$("trainSource").addEventListener("change", () => refreshTrainingSamples().catch((error) => {
+  $("trainingStatus").textContent = `Training source change failed: ${error.message}`;
+}));
+$("trainRecipe").addEventListener("change", () => refreshTrainingSamples().catch((error) => {
+  $("trainingStatus").textContent = `Recipe filter change failed: ${error.message}`;
 }));
 $("startTrainingButton").addEventListener("click", () => startTraining().catch((error) => {
   $("trainingStatus").textContent = `Training start failed: ${error.message}`;
@@ -1079,6 +1414,7 @@ loadRecipes()
   .then(loadCalibration)
   .then(loadCameraSettings)
   .then(refreshTrainingDependencies)
+  .then(loadTrainingFolder)
   .then(refreshTrainingDatasets)
   .then(refreshTrainingSamples)
   .then(refreshTrainingStatus)
