@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from robot_vision.camera import create_camera
 from robot_vision.camera.base import depth_to_display, encode_jpeg_base64, encode_png_base64
 from robot_vision.config import AppConfig, load_config
-from robot_vision.inspection.calibration import CalibrationProfile
+from robot_vision.inspection.calibration import CalibrationProfile, DepthReference
 from robot_vision.inspection.engine import InspectionEngine, debug_candidate_lines_in_roi, detect_rectangle_in_roi
 from robot_vision.inspection.models import InspectionRecipe, InspectionTool
 from robot_vision.inspection.trigger import PresenceTrigger
@@ -53,6 +53,11 @@ class CalibrationDetectPayload(BaseModel):
     roi: list[float] = Field(min_length=4, max_length=4)
     real_width_mm: float = Field(gt=0)
     real_height_mm: float = Field(gt=0)
+
+
+class DepthReferencePayload(BaseModel):
+    name: str = "default"
+    roi: list[float] = Field(min_length=4, max_length=4)
 
 
 class CameraSettingsPayload(BaseModel):
@@ -288,6 +293,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 "height_px": detection.height_px,
                 "search_area_px": list(detection.search_area_px),
             },
+            "rgb_png": encode_png_base64(frame.rgb),
+            "depth_png": encode_png_base64(depth_to_display(frame.depth)) if frame.depth is not None else None,
+        }
+
+    @app.post("/api/calibration/depth-reference")
+    def capture_depth_reference(payload: DepthReferencePayload):
+        frame = _snapshot_or_error(camera, camera_lock)
+        if frame.depth is None:
+            raise HTTPException(status_code=422, detail="No depth frame available for depth reference")
+        roi = tuple(float(v) for v in payload.roi)
+        try:
+            profile = calibration.load(payload.name)
+            profile.depth_reference = DepthReference.from_depth(frame.depth, roi)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        path = calibration.save(profile)
+        return {
+            "saved": True,
+            "path": str(path),
+            "calibration": profile.to_dict(),
+            "depth_reference": profile.depth_reference.to_dict() if profile.depth_reference is not None else None,
             "rgb_png": encode_png_base64(frame.rgb),
             "depth_png": encode_png_base64(depth_to_display(frame.depth)) if frame.depth is not None else None,
         }

@@ -4,7 +4,7 @@ import numpy as np
 
 from robot_vision.camera.mock import MockCamera
 from robot_vision.config import CameraConfig
-from robot_vision.inspection.calibration import CalibrationProfile
+from robot_vision.inspection.calibration import CalibrationProfile, DepthReference
 from robot_vision.inspection.engine import (
     InspectionEngine,
     debug_candidate_lines,
@@ -178,6 +178,35 @@ def test_edge_tools_measure_outline_sides():
     assert result.measurements["depth_background_mm"] == 900.0
     assert result.measurements["depth_height_mm"] == 300.0
     assert result.measurements["outline_corners"]
+
+
+def test_depth_height_uses_reference_plane_when_calibrated():
+    image = np.full((120, 160, 3), 45, dtype=np.uint8)
+    image[52:78, 70:120] = 205
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.25 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 50.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+    )
+    tool = InspectionTool.from_dict({
+        "id": "edge",
+        "name": "Outline edge",
+        "type": "edge_2",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+        "line_orientation": "auto",
+        "min_edge_score": 1,
+        "min_line_length_ratio": 0.05,
+    })
+
+    result = InspectionEngine()._inspect_edge(image, tool, calibration, depth)
+
+    assert result.measurements["depth_method"] == "reference_plane"
+    assert result.measurements["depth_height_mm"] == 50.0
+    assert result.measurements["depth_reference_mm"] > result.measurements["depth_top_mm"]
 
 
 def test_debug_candidate_lines_returns_hough_candidates():

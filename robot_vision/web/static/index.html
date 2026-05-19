@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Robot Vision</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260518-hf-ui-v3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260519-depth-reference" />
   </head>
   <body>
     <header class="topbar">
@@ -108,6 +108,7 @@
           <div class="field-row">
             <button id="detectCalibrationButton" class="primary">Detect & Save Calibration</button>
             <button id="calibrateButton">Save Manual Pixels</button>
+            <button id="depthReferenceButton">Capture Depth Zero</button>
           </div>
           <p class="help-text" id="calibrationStatus">Orange: search area. Blue: detected calibration rectangle.</p>
         </section>
@@ -174,6 +175,6 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=20260518-hf-ui-v3"></script>
+    <script src="/static/app.js?v=20260519-depth-reference"></script>
   </body>
 </html>

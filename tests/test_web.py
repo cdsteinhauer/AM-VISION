@@ -76,6 +76,10 @@ def test_health_and_mock_inspection(tmp_path):
     reports = client.get("/api/reports")
     assert len(reports.json()["reports"]) == 1
 
+    depth_reference = client.post("/api/calibration/depth-reference", json={"roi": [0.0, 0.0, 0.2, 0.2]})
+    assert depth_reference.status_code == 200
+    assert depth_reference.json()["depth_reference"]["sample_count"] > 0
+
 
 def test_training_samples_collect_from_all_capture_datasets(tmp_path):
     _write_capture_samples(tmp_path)

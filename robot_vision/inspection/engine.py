@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from robot_vision.inspection.calibration import CalibrationProfile
+from robot_vision.inspection.calibration import CalibrationProfile, depth_array_to_mm, depth_value_to_mm
 from robot_vision.inspection.models import InspectionRecipe, InspectionTool
 from robot_vision.config import PROJECT_ROOT
 
@@ -116,7 +116,14 @@ class InspectionEngine:
                 "outline_angle_deg": round(detection.angle_deg, 3),
                 "outline_fill_ratio": round(detection.fill_ratio, 4),
                 "outline_score": round(detection.outline_score, 3),
-                **_depth_height_measurements(depth, detection.bbox_px, detection.search_area_px, image.shape[:2]),
+                **_depth_height_measurements(
+                    depth,
+                    detection.bbox_px,
+                    detection.search_area_px,
+                    image.shape[:2],
+                    calibration,
+                    detection.corners_px,
+                ),
             },
             detection.bbox_px,
             messages,
@@ -236,7 +243,14 @@ class InspectionEngine:
                     "line_a": [float(value) for value in detected_line],
                     "debug_lines": _offset_debug_lines(debug_lines, x, y),
                     **_outline_measurements(outline, calibration),
-                    **_depth_height_measurements(depth, outline.bbox_px, outline.search_area_px, image.shape[:2]),
+                    **_depth_height_measurements(
+                        depth,
+                        outline.bbox_px,
+                        outline.search_area_px,
+                        image.shape[:2],
+                        calibration,
+                        outline.corners_px,
+                    ),
                 },
                 outline.bbox_px,
                 messages,
@@ -278,7 +292,14 @@ class InspectionEngine:
                 "line_b": [float(value) for value in line_b],
                 "debug_lines": _offset_debug_lines(debug_lines, x, y),
                 **_outline_measurements(outline, calibration),
-                **_depth_height_measurements(depth, outline.bbox_px, outline.search_area_px, image.shape[:2]),
+                **_depth_height_measurements(
+                    depth,
+                    outline.bbox_px,
+                    outline.search_area_px,
+                    image.shape[:2],
+                    calibration,
+                    outline.corners_px,
+                ),
             },
             outline.bbox_px,
             messages,
@@ -601,6 +622,8 @@ def _depth_height_measurements(
     bbox_px: tuple[int, int, int, int] | None,
     search_area_px: tuple[int, int, int, int] | None,
     image_shape: tuple[int, int],
+    calibration: CalibrationProfile,
+    object_corners_px: tuple[tuple[int, int], ...] = (),
 ) -> dict[str, Any]:
     if depth is None or bbox_px is None or search_area_px is None:
         return {}
@@ -609,17 +632,59 @@ def _depth_height_measurements(
     image_height, image_width = image_shape
     bbox = _scale_box_to_depth(bbox_px, image_width, image_height, depth.shape[1], depth.shape[0])
     search = _scale_search_to_depth(search_area_px, image_width, image_height, depth.shape[1], depth.shape[0])
-    object_depth = _median_valid_depth(_crop_depth(depth, bbox))
+
+    object_mask = _object_depth_mask(depth.shape, bbox, object_corners_px, image_width, image_height)
+    object_values = depth[object_mask]
+    object_depth = _median_valid_depth(object_values)
+    if object_depth is None:
+        return {}
+
+    reference = calibration.depth_reference
+    if reference is not None:
+        ys, xs = np.nonzero(object_mask)
+        observed_mm = _valid_depth_mm(depth[ys, xs])
+        if observed_mm.size == 0:
+            return {}
+        valid_positions = np.isfinite(depth[ys, xs]) & (depth[ys, xs] > 0)
+        xs = xs[valid_positions]
+        ys = ys[valid_positions]
+        reference_mm_values = reference.depth_mm_at(xs, ys, depth.shape)
+        valid_reference = np.isfinite(reference_mm_values) & (reference_mm_values > 0)
+        if not np.any(valid_reference):
+            return {}
+        reference_mm_values = reference_mm_values[valid_reference]
+        observed_mm = observed_mm[valid_reference]
+        height_values = reference_mm_values - observed_mm
+        height_values = height_values[np.isfinite(height_values)]
+        if height_values.size == 0:
+            return {}
+        object_mm = float(np.median(observed_mm))
+        reference_mm = float(np.median(reference_mm_values))
+        height_mm = max(0.0, float(np.median(height_values)))
+        return {
+            "depth_object_mm": round(object_mm, 3),
+            "depth_top_mm": round(object_mm, 3),
+            "depth_background_mm": round(reference_mm, 3),
+            "depth_reference_mm": round(reference_mm, 3),
+            "depth_height_mm": round(height_mm, 3),
+            "depth_valid_px": int(height_values.size),
+            "depth_method": "reference_plane",
+            "depth_reference_residual_mad_mm": reference.residual_mad_mm,
+        }
+
     background_depth = _background_depth_around_box(depth, bbox, search)
-    if object_depth is None or background_depth is None:
+    if background_depth is None:
         return {}
     object_mm = _depth_value_to_mm(object_depth)
     background_mm = _depth_value_to_mm(background_depth)
     height_mm = max(0.0, background_mm - object_mm)
     return {
         "depth_object_mm": round(object_mm, 3),
+        "depth_top_mm": round(object_mm, 3),
         "depth_background_mm": round(background_mm, 3),
         "depth_height_mm": round(height_mm, 3),
+        "depth_valid_px": int(_valid_depth_mm(object_values).size),
+        "depth_method": "local_background_ring",
     }
 
 
@@ -674,6 +739,54 @@ def _crop_depth(depth: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray
     return depth[y0:y1 + 1, x0:x1 + 1]
 
 
+def _object_depth_mask(
+    depth_shape: tuple[int, int],
+    bbox: tuple[int, int, int, int],
+    corners_px: tuple[tuple[int, int], ...],
+    image_width: int,
+    image_height: int,
+) -> np.ndarray:
+    mask = np.zeros(depth_shape, dtype=bool)
+    depth_height, depth_width = depth_shape
+    if corners_px:
+        sx = depth_width / max(1, image_width)
+        sy = depth_height / max(1, image_height)
+        points = np.array(
+            [[int(round(x * sx)), int(round(y * sy))] for x, y in corners_px],
+            dtype=np.int32,
+        )
+        points[:, 0] = np.clip(points[:, 0], 0, depth_width - 1)
+        points[:, 1] = np.clip(points[:, 1], 0, depth_height - 1)
+        try:
+            import cv2
+
+            polygon_mask = np.zeros(depth_shape, dtype=np.uint8)
+            cv2.fillPoly(polygon_mask, [points], 1)
+            mask = polygon_mask.astype(bool)
+        except Exception:
+            x0, y0, x1, y1 = bbox
+            mask[y0:y1 + 1, x0:x1 + 1] = True
+    else:
+        x0, y0, x1, y1 = bbox
+        mask[y0:y1 + 1, x0:x1 + 1] = True
+
+    x0, y0, x1, y1 = bbox
+    bounded = np.zeros_like(mask)
+    bounded[y0:y1 + 1, x0:x1 + 1] = mask[y0:y1 + 1, x0:x1 + 1]
+    if int(np.count_nonzero(bounded)) < 9:
+        return bounded
+    try:
+        import cv2
+
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        eroded = cv2.erode(bounded.astype(np.uint8), kernel, iterations=1).astype(bool)
+        if int(np.count_nonzero(eroded)) >= 9:
+            return eroded
+    except Exception:
+        pass
+    return bounded
+
+
 def _background_depth_around_box(
     depth: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -720,11 +833,17 @@ def _median_valid_depth(values: np.ndarray) -> float | None:
     return float(np.median(valid))
 
 
+def _valid_depth_mm(values: np.ndarray) -> np.ndarray:
+    flat = np.asarray(values, dtype=np.float64).reshape(-1)
+    valid = flat[np.isfinite(flat) & (flat > 0)]
+    if valid.size == 0:
+        return np.array([], dtype=np.float64)
+    return depth_array_to_mm(valid)
+
+
 def _depth_value_to_mm(value: float) -> float:
     # ROS 32FC1 depth is commonly meters; 16UC1 depth and mock depth are millimeters.
-    if value < 20.0:
-        return value * 1000.0
-    return value
+    return depth_value_to_mm(value)
 
 
 def _corners_to_measurement(corners: tuple[tuple[int, int], ...]) -> list[list[float]]:

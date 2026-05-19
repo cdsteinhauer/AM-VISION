@@ -123,8 +123,9 @@ Current Jetson hardware status:
    - `Snap Capture`: no automatic refresh; each `Snap` press grabs and displays a new still frame.
 3. Create or edit inspection tools in the recipe panel.
 4. Save calibration using a known plate/grid/rectangle.
-5. Press `Inspect`, or use `Live Capture` with `Auto`.
-6. Review pass/fail, dimensions, overlays, and saved reports.
+5. With the fixture empty, use `Capture Depth Zero` to save the table/fixture plane used for depth height.
+6. Press `Inspect`, or use `Live Capture` with `Auto`.
+7. Review pass/fail, dimensions, overlays, and saved reports.
 
 Reports are written under:
 

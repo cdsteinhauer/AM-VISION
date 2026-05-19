@@ -1007,7 +1007,8 @@ async function loadCalibration(name = "default") {
     if (profile.pixel_height) $("pixelHeight").value = profile.pixel_height;
     if (profile.real_width_mm) $("realWidth").value = profile.real_width_mm;
     if (profile.real_height_mm) $("realHeight").value = profile.real_height_mm;
-    $("calibrationStatus").textContent = `Loaded calibration: ${Number(profile.pixels_per_mm_x).toFixed(3)} px/mm X, ${Number(profile.pixels_per_mm_y).toFixed(3)} px/mm Y.`;
+    const depthText = profile.depth_reference ? " Depth zero ready." : "";
+    $("calibrationStatus").textContent = `Loaded calibration: ${Number(profile.pixels_per_mm_x).toFixed(3)} px/mm X, ${Number(profile.pixels_per_mm_y).toFixed(3)} px/mm Y.${depthText}`;
     return profile;
   } catch (error) {
     $("calibrationStatus").textContent = `Calibration not loaded: ${error.message}`;
@@ -1038,6 +1039,31 @@ async function detectCalibration() {
       detection: data.detection,
     }, null, 2);
     $("calibrationStatus").textContent = `Detected ${data.detection.width_px} x ${data.detection.height_px} px. Saved ${data.calibration.pixels_per_mm_x.toFixed(3)} px/mm X, ${data.calibration.pixels_per_mm_y.toFixed(3)} px/mm Y.`;
+    drawOverlay(state.lastResultTools || []);
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function captureDepthReference() {
+  if (state.busy) return;
+  state.busy = true;
+  try {
+    const data = await api("/api/calibration/depth-reference", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "default",
+        roi: readCalibrationRoiFromUi(),
+      }),
+    });
+    $("rgbImage").src = `data:image/png;base64,${data.rgb_png}`;
+    if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
+    $("resultBox").textContent = JSON.stringify({
+      calibration: data.calibration,
+      depth_reference: data.depth_reference,
+    }, null, 2);
+    const ref = data.depth_reference || {};
+    $("calibrationStatus").textContent = `Depth zero saved: ${ref.sample_count || 0} px, median ${Number(ref.median_mm || 0).toFixed(2)} mm, residual ${Number(ref.residual_mad_mm || 0).toFixed(2)} mm.`;
     drawOverlay(state.lastResultTools || []);
   } finally {
     state.busy = false;
@@ -1361,6 +1387,10 @@ $("detectCalibrationButton").addEventListener("click", () => detectCalibration()
   } else {
     $("calibrationStatus").textContent = `Calibration detect failed: ${error.message}`;
   }
+  setStatus("resultStatus", "Calibration: failed");
+}));
+$("depthReferenceButton").addEventListener("click", () => captureDepthReference().catch((error) => {
+  $("calibrationStatus").textContent = `Depth zero failed: ${error.message}`;
   setStatus("resultStatus", "Calibration: failed");
 }));
 $("refreshCameraSettingsButton").addEventListener("click", loadCameraSettings);
