@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,8 @@ class RectangleDetection:
     angle_deg: float = 0.0
     fill_ratio: float = 0.0
     outline_score: float = 0.0
+    depth_bbox_px: tuple[int, int, int, int] | None = None
+    depth_corners_px: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class PartOutlineDetection:
     fill_ratio: float
     outline_score: float
     search_area_px: tuple[int, int, int, int]
+    depth_bbox_px: tuple[int, int, int, int] | None = None
+    depth_corners_px: tuple[tuple[int, int], ...] = ()
 
 
 class InspectionEngine:
@@ -81,7 +85,12 @@ class InspectionEngine:
         depth: np.ndarray | None = None,
     ) -> ToolResult:
         messages: list[str] = []
-        detection = detect_rectangle_in_roi(image, tool.roi)
+        rgb_detection = detect_rectangle_in_roi(image, tool.roi)
+        depth_detection = detect_depth_rectangle_in_roi(depth, tool.roi, image.shape[:2], calibration)
+        detection = _rectangle_with_depth_sample(rgb_detection, depth_detection)
+        detection_method = "rgb" if rgb_detection is not None else "depth_reference"
+        if detection is None:
+            detection = depth_detection
         if detection is None:
             return ToolResult(tool.id, tool.name, False, {}, None, ["No rectangular part found in detection area"])
 
@@ -92,12 +101,13 @@ class InspectionEngine:
         passed &= _check_range("width", width_mm, tool.min_width_mm, tool.max_width_mm, messages)
         passed &= _check_range("height", height_mm, tool.min_height_mm, tool.max_height_mm, messages)
         if not messages:
-            messages.append("Rectangle detected inside search area")
+            messages.append("Part detected inside search area")
         return ToolResult(
             tool.id,
             tool.name,
             passed,
             {
+                "detection_method": detection_method,
                 "width_px": float(detection.width_px),
                 "height_px": float(detection.height_px),
                 "width_mm": round(width_mm, 3),
@@ -123,10 +133,12 @@ class InspectionEngine:
                     image.shape[:2],
                     calibration,
                     detection.corners_px,
+                    detection.depth_bbox_px,
+                    detection.depth_corners_px,
                 ),
             },
             detection.bbox_px,
-            messages,
+            _detection_messages(messages, detection_method),
         )
 
     def _inspect_ai_classifier(self, image: np.ndarray, tool: InspectionTool) -> ToolResult:
@@ -196,7 +208,12 @@ class InspectionEngine:
     ) -> ToolResult:
         x, y, w, h = _roi_pixels(tool.roi, image.shape[1], image.shape[0])
         orientation_request = tool.line_orientation or "auto"
-        outline = detect_part_outline_in_roi(image, tool.roi, tool.min_edge_score)
+        rgb_outline = detect_part_outline_in_roi(image, tool.roi, tool.min_edge_score)
+        depth_outline = detect_depth_part_outline_in_roi(depth, tool.roi, image.shape[:2], calibration)
+        outline = _outline_with_depth_sample(rgb_outline, depth_outline)
+        detection_method = "rgb" if rgb_outline is not None else "depth_reference"
+        if outline is None:
+            outline = depth_outline
         debug_lines = debug_candidate_lines(
             image[y:y + h, x:x + w],
             orientation_request,
@@ -235,6 +252,7 @@ class InspectionEngine:
                 tool.name,
                 passed,
                 {
+                    "detection_method": detection_method,
                     "line_score": round(line["score"], 3),
                     "line_length_px": float(length_px),
                     "line_length_mm": round(length_mm, 3),
@@ -250,10 +268,12 @@ class InspectionEngine:
                         image.shape[:2],
                         calibration,
                         outline.corners_px,
+                        outline.depth_bbox_px,
+                        outline.depth_corners_px,
                     ),
                 },
                 outline.bbox_px,
-                messages,
+                _detection_messages(messages, detection_method),
             )
 
         pair = _outline_parallel_line_pair(outline, orientation_request, tool.min_line_length_ratio)
@@ -280,6 +300,7 @@ class InspectionEngine:
             tool.name,
             passed,
             {
+                "detection_method": detection_method,
                 "line_score": round(pair["score"], 3),
                 "line_gap_px": float(pair["gap_px"]),
                 "line_a_length_px": float(pair["line_a_length_px"]),
@@ -299,10 +320,12 @@ class InspectionEngine:
                     image.shape[:2],
                     calibration,
                     outline.corners_px,
+                    outline.depth_bbox_px,
+                    outline.depth_corners_px,
                 ),
             },
             outline.bbox_px,
-            messages,
+            _detection_messages(messages, detection_method),
         )
 
     @staticmethod
@@ -315,6 +338,36 @@ class InspectionEngine:
             "bbox_px": list(result.bbox_px) if result.bbox_px else None,
             "messages": result.messages,
         }
+
+
+def _rectangle_with_depth_sample(
+    rgb_detection: RectangleDetection | None,
+    depth_detection: RectangleDetection | None,
+) -> RectangleDetection | None:
+    if rgb_detection is None:
+        return depth_detection
+    if depth_detection is None:
+        return rgb_detection
+    return replace(
+        rgb_detection,
+        depth_bbox_px=depth_detection.depth_bbox_px,
+        depth_corners_px=depth_detection.depth_corners_px,
+    )
+
+
+def _outline_with_depth_sample(
+    rgb_outline: PartOutlineDetection | None,
+    depth_outline: PartOutlineDetection | None,
+) -> PartOutlineDetection | None:
+    if rgb_outline is None:
+        return depth_outline
+    if depth_outline is None:
+        return rgb_outline
+    return replace(
+        rgb_outline,
+        depth_bbox_px=depth_outline.depth_bbox_px,
+        depth_corners_px=depth_outline.depth_corners_px,
+    )
 
 
 def _gray(image: np.ndarray) -> np.ndarray:
@@ -333,6 +386,59 @@ def detect_part_outline_in_roi(
     if outline is None:
         return None
     return _offset_outline(outline, x, y, (x, y, w, h))
+
+
+def detect_depth_rectangle_in_roi(
+    depth: np.ndarray | None,
+    roi: tuple[float, float, float, float],
+    image_shape: tuple[int, int],
+    calibration: CalibrationProfile,
+) -> RectangleDetection | None:
+    outline = detect_depth_part_outline_in_roi(depth, roi, image_shape, calibration)
+    if outline is None:
+        return None
+    return RectangleDetection(
+        bbox_px=outline.bbox_px,
+        width_px=outline.width_px,
+        height_px=outline.height_px,
+        search_area_px=outline.search_area_px,
+        corners_px=outline.corners_px,
+        angle_deg=outline.angle_deg,
+        fill_ratio=outline.fill_ratio,
+        outline_score=outline.outline_score,
+        depth_bbox_px=outline.depth_bbox_px,
+        depth_corners_px=outline.depth_corners_px,
+    )
+
+
+def detect_depth_part_outline_in_roi(
+    depth: np.ndarray | None,
+    roi: tuple[float, float, float, float],
+    image_shape: tuple[int, int],
+    calibration: CalibrationProfile,
+) -> PartOutlineDetection | None:
+    if depth is None or depth.ndim != 2 or calibration.depth_reference is None:
+        return None
+    image_height, image_width = image_shape
+    image_search = _roi_pixels(roi, image_width, image_height)
+    depth_search = _scale_search_to_depth(image_search, image_width, image_height, depth.shape[1], depth.shape[0])
+    x0, y0, x1, y1 = depth_search
+    height_map, valid = _reference_height_map(depth, calibration, depth_search)
+    threshold = _depth_detection_threshold_mm(calibration)
+    mask = valid & (height_map >= threshold)
+    if not np.any(mask):
+        return None
+    outline = _best_depth_part_outline(_clean_mask(mask), min_pixels=12)
+    if outline is None:
+        return None
+    return _depth_outline_to_image_outline(
+        outline,
+        depth_origin=(x0, y0),
+        depth_shape=depth.shape,
+        image_shape=image_shape,
+        image_search=image_search,
+        calibration=calibration,
+    )
 
 
 def _detect_part_outline(image: np.ndarray, min_pixels: float = 20.0) -> PartOutlineDetection | None:
@@ -413,6 +519,41 @@ def _best_part_outline(mask: np.ndarray, min_pixels: int) -> PartOutlineDetectio
     return best
 
 
+def _best_depth_part_outline(mask: np.ndarray, min_pixels: int) -> PartOutlineDetection | None:
+    height, width = mask.shape
+    components = _merge_nearby_components(_connected_components(mask), mask.shape)
+    if not components:
+        return None
+
+    minimum_area = max(min_pixels, int(width * height * 0.0005))
+    roi_center = np.array([width / 2.0, height / 2.0], dtype=np.float32)
+    roi_diag = max(1.0, float((width * width + height * height) ** 0.5))
+    best: PartOutlineDetection | None = None
+    best_score = 0.0
+    for x0, y0, x1, y1, area in components:
+        if area < minimum_area:
+            continue
+        bbox_w = x1 - x0 + 1
+        bbox_h = y1 - y0 + 1
+        if bbox_w >= width * 0.98 and bbox_h >= height * 0.98:
+            continue
+        fill = area / max(1, bbox_w * bbox_h)
+        if fill < 0.20:
+            continue
+        coverage = (bbox_w * bbox_h) / max(1, width * height)
+        if coverage > 0.90:
+            continue
+        center = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0], dtype=np.float32)
+        center_factor = 1.0 - min(0.75, float(np.linalg.norm(center - roi_center)) / roi_diag)
+        outline = _fit_outline_from_mask(mask, (x0, y0, x1, y1), fill, float(area * max(0.1, fill) * center_factor))
+        if outline is None:
+            continue
+        if outline.outline_score > best_score:
+            best_score = outline.outline_score
+            best = outline
+    return best
+
+
 def _fit_outline_from_mask(
     mask: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -437,15 +578,26 @@ def _fit_outline_from_mask(
         )
     except Exception:
         corners = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+    return _part_outline_from_corners(corners, fill_ratio, score, (0, 0, mask.shape[1], mask.shape[0]))
+
+
+def _part_outline_from_corners(
+    corners: tuple[tuple[int, int], ...],
+    fill_ratio: float,
+    score: float,
+    search_area_px: tuple[int, int, int, int],
+) -> PartOutlineDetection | None:
+    if len(corners) < 4:
+        return None
     corners = _order_corners(corners)
     sides = _outline_sides(corners)
     side_lengths = sorted((side["length_px"] for side in sides), reverse=True)
+    if len(side_lengths) < 4:
+        return None
     long_side = float((side_lengths[0] + side_lengths[1]) / 2.0)
     short_side = float((side_lengths[2] + side_lengths[3]) / 2.0)
-    horizontal = [side for side in sides if side["orientation"] == "horizontal"]
-    vertical = [side for side in sides if side["orientation"] == "vertical"]
-    width_px = _average_side_length(horizontal) if horizontal else long_side
-    height_px = _average_side_length(vertical) if vertical else short_side
+    width_px = long_side
+    height_px = short_side
     bbox_px = _bbox_from_corners(corners)
     angle_deg = _outline_angle_deg(sides)
     return PartOutlineDetection(
@@ -458,7 +610,7 @@ def _fit_outline_from_mask(
         angle_deg=angle_deg,
         fill_ratio=float(fill_ratio),
         outline_score=float(score),
-        search_area_px=(0, 0, mask.shape[1], mask.shape[0]),
+        search_area_px=search_area_px,
     )
 
 
@@ -481,6 +633,51 @@ def _offset_outline(
         fill_ratio=outline.fill_ratio,
         outline_score=outline.outline_score,
         search_area_px=search_area_px,
+        depth_bbox_px=outline.depth_bbox_px,
+        depth_corners_px=outline.depth_corners_px,
+    )
+
+
+def _depth_outline_to_image_outline(
+    outline: PartOutlineDetection,
+    depth_origin: tuple[int, int],
+    depth_shape: tuple[int, int],
+    image_shape: tuple[int, int],
+    image_search: tuple[int, int, int, int],
+    calibration: CalibrationProfile,
+) -> PartOutlineDetection | None:
+    depth_x, depth_y = depth_origin
+    depth_height, depth_width = depth_shape
+    image_height, image_width = image_shape
+    sx = image_width / max(1, depth_width)
+    sy = image_height / max(1, depth_height)
+    offset_x = calibration.depth_rgb_offset_x_px
+    offset_y = calibration.depth_rgb_offset_y_px
+    depth_corners = tuple((x + depth_x, y + depth_y) for x, y in outline.corners_px)
+    corners = tuple(
+        (
+            max(0, min(image_width - 1, int(round(x * sx + offset_x)))),
+            max(0, min(image_height - 1, int(round(y * sy + offset_y)))),
+        )
+        for x, y in depth_corners
+    )
+    image_outline = _part_outline_from_corners(corners, outline.fill_ratio, outline.outline_score, image_search)
+    if image_outline is None:
+        return None
+    depth_bbox = _bbox_from_corners(depth_corners)
+    return PartOutlineDetection(
+        bbox_px=image_outline.bbox_px,
+        corners_px=image_outline.corners_px,
+        width_px=image_outline.width_px,
+        height_px=image_outline.height_px,
+        long_side_px=image_outline.long_side_px,
+        short_side_px=image_outline.short_side_px,
+        angle_deg=image_outline.angle_deg,
+        fill_ratio=image_outline.fill_ratio,
+        outline_score=image_outline.outline_score,
+        search_area_px=image_outline.search_area_px,
+        depth_bbox_px=depth_bbox,
+        depth_corners_px=depth_corners,
     )
 
 
@@ -624,16 +821,25 @@ def _depth_height_measurements(
     image_shape: tuple[int, int],
     calibration: CalibrationProfile,
     object_corners_px: tuple[tuple[int, int], ...] = (),
+    depth_bbox_px: tuple[int, int, int, int] | None = None,
+    depth_corners_px: tuple[tuple[int, int], ...] = (),
 ) -> dict[str, Any]:
     if depth is None or bbox_px is None or search_area_px is None:
         return {}
     if depth.ndim != 2:
         return {}
     image_height, image_width = image_shape
-    bbox = _scale_box_to_depth(bbox_px, image_width, image_height, depth.shape[1], depth.shape[0])
+    bbox = depth_bbox_px or _scale_box_to_depth(bbox_px, image_width, image_height, depth.shape[1], depth.shape[0])
     search = _scale_search_to_depth(search_area_px, image_width, image_height, depth.shape[1], depth.shape[0])
 
-    object_mask = _object_depth_mask(depth.shape, bbox, object_corners_px, image_width, image_height)
+    object_mask = _object_depth_mask(
+        depth.shape,
+        bbox,
+        object_corners_px,
+        image_width,
+        image_height,
+        depth_corners_px,
+    )
     object_values = depth[object_mask]
     object_depth = _median_valid_depth(object_values)
     if object_depth is None:
@@ -670,6 +876,8 @@ def _depth_height_measurements(
             "depth_valid_px": int(height_values.size),
             "depth_method": "reference_plane",
             "depth_reference_residual_mad_mm": reference.residual_mad_mm,
+            "depth_rgb_offset_x_px": calibration.depth_rgb_offset_x_px,
+            "depth_rgb_offset_y_px": calibration.depth_rgb_offset_y_px,
         }
 
     background_depth = _background_depth_around_box(depth, bbox, search)
@@ -686,6 +894,35 @@ def _depth_height_measurements(
         "depth_valid_px": int(_valid_depth_mm(object_values).size),
         "depth_method": "local_background_ring",
     }
+
+
+def _reference_height_map(
+    depth: np.ndarray,
+    calibration: CalibrationProfile,
+    box: tuple[int, int, int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    reference = calibration.depth_reference
+    if reference is None:
+        shape = _crop_depth(depth, box).shape
+        return np.zeros(shape, dtype=np.float64), np.zeros(shape, dtype=bool)
+    x0, y0, x1, y1 = box
+    crop = _crop_depth(depth, box)
+    yy, xx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
+    observed_mm = depth_array_to_mm(crop)
+    reference_mm = reference.depth_mm_at(xx, yy, depth.shape)
+    valid = (
+        np.isfinite(crop)
+        & (crop > 0)
+        & np.isfinite(reference_mm)
+        & (reference_mm > 0)
+    )
+    return reference_mm - observed_mm, valid
+
+
+def _depth_detection_threshold_mm(calibration: CalibrationProfile) -> float:
+    residual = calibration.depth_reference.residual_mad_mm if calibration.depth_reference is not None else None
+    noise_floor = 0.0 if residual is None else max(0.0, residual * 6.0)
+    return max(3.0, noise_floor)
 
 
 def _scale_box_to_depth(
@@ -745,16 +982,20 @@ def _object_depth_mask(
     corners_px: tuple[tuple[int, int], ...],
     image_width: int,
     image_height: int,
+    depth_corners_px: tuple[tuple[int, int], ...] = (),
 ) -> np.ndarray:
     mask = np.zeros(depth_shape, dtype=bool)
     depth_height, depth_width = depth_shape
-    if corners_px:
-        sx = depth_width / max(1, image_width)
-        sy = depth_height / max(1, image_height)
-        points = np.array(
-            [[int(round(x * sx)), int(round(y * sy))] for x, y in corners_px],
-            dtype=np.int32,
-        )
+    if depth_corners_px or corners_px:
+        if depth_corners_px:
+            points = np.array(depth_corners_px, dtype=np.int32)
+        else:
+            sx = depth_width / max(1, image_width)
+            sy = depth_height / max(1, image_height)
+            points = np.array(
+                [[int(round(x * sx)), int(round(y * sy))] for x, y in corners_px],
+                dtype=np.int32,
+            )
         points[:, 0] = np.clip(points[:, 0], 0, depth_width - 1)
         points[:, 1] = np.clip(points[:, 1], 0, depth_height - 1)
         try:
@@ -1515,6 +1756,11 @@ def _roi_pixels(roi: tuple[float, float, float, float], width: int, height: int)
     w = max(1, min(width - x, int(roi[2] * width)))
     h = max(1, min(height - y, int(roi[3] * height)))
     return x, y, w, h
+
+
+def _detection_messages(messages: list[str], detection_method: str) -> list[str]:
+    prefix = "Depth part detected" if detection_method == "depth_reference" else "RGB outline detected"
+    return [prefix, *messages]
 
 
 def _check_range(

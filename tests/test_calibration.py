@@ -43,10 +43,16 @@ def test_calibration_profile_round_trips_depth_reference():
         median_mm=900.0,
         residual_mad_mm=0.5,
     )
-    profile = CalibrationProfile(depth_reference=reference)
+    profile = CalibrationProfile(
+        depth_reference=reference,
+        depth_rgb_offset_x_px=-12.0,
+        depth_rgb_offset_y_px=8.0,
+    )
 
     loaded = CalibrationProfile.from_dict(profile.to_dict())
 
     assert loaded.depth_reference is not None
     assert loaded.depth_reference.plane_coefficients == (0.4, 0.2, 875.0)
     assert loaded.depth_reference.roi == (0.1, 0.1, 0.8, 0.8)
+    assert loaded.depth_rgb_offset_x_px == -12.0
+    assert loaded.depth_rgb_offset_y_px == 8.0

@@ -91,18 +91,26 @@ class ReportStore:
         image = Image.fromarray(_uint8_rgb(rgb), mode="RGB")
         draw = ImageDraw.Draw(image)
         for tool in result.get("tools", []):
-            line_a = tool.get("measurements", {}).get("line_a")
-            line_b = tool.get("measurements", {}).get("line_b")
+            measurements = tool.get("measurements", {})
+            line_a = measurements.get("line_a")
+            line_b = measurements.get("line_b")
+            outline_corners = measurements.get("outline_corners") or []
+            color = (21, 150, 80) if tool.get("passed") else (210, 52, 42)
+            if len(outline_corners) >= 4:
+                points = [tuple(point) for point in outline_corners]
+                draw.line(points + [points[0]], fill=color, width=5)
+                if not line_a:
+                    label_x = min(point[0] for point in points)
+                    label_y = min(point[1] for point in points)
+                    draw.text((label_x + 6, max(0, label_y - 18)), tool.get("name", "Tool"), fill=color)
             if line_a and line_b:
-                color = (21, 150, 80) if tool.get("passed") else (210, 52, 42)
                 draw.line(tuple(line_a), fill=color, width=5)
                 draw.line(tuple(line_b), fill=color, width=5)
                 draw.text((line_a[0] + 6, max(0, line_a[1] - 18)), tool.get("name", "Tool"), fill=color)
                 continue
             bbox = tool.get("bbox_px")
-            if not bbox:
+            if not bbox or len(outline_corners) >= 4:
                 continue
-            color = (21, 150, 80) if tool.get("passed") else (210, 52, 42)
             draw.rectangle(tuple(bbox), outline=color, width=5)
             draw.text((bbox[0] + 6, max(0, bbox[1] - 18)), tool.get("name", "Tool"), fill=color)
         image.save(path)

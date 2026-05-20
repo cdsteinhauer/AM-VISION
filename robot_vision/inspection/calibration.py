@@ -105,6 +105,8 @@ class CalibrationProfile:
     real_width_mm: float | None = None
     real_height_mm: float | None = None
     depth_reference: DepthReference | None = None
+    depth_rgb_offset_x_px: float = 0.0
+    depth_rgb_offset_y_px: float = 0.0
 
     @staticmethod
     def from_reference(
@@ -141,6 +143,8 @@ class CalibrationProfile:
             real_width_mm=_optional_float(data.get("real_width_mm")),
             real_height_mm=_optional_float(data.get("real_height_mm")),
             depth_reference=DepthReference.from_dict(data.get("depth_reference")),
+            depth_rgb_offset_x_px=float(data.get("depth_rgb_offset_x_px", 0.0)),
+            depth_rgb_offset_y_px=float(data.get("depth_rgb_offset_y_px", 0.0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -154,6 +158,8 @@ class CalibrationProfile:
             "real_width_mm": self.real_width_mm,
             "real_height_mm": self.real_height_mm,
             "depth_reference": self.depth_reference.to_dict() if self.depth_reference is not None else None,
+            "depth_rgb_offset_x_px": self.depth_rgb_offset_x_px,
+            "depth_rgb_offset_y_px": self.depth_rgb_offset_y_px,
         }
 
     def width_mm(self, pixels: float) -> float:

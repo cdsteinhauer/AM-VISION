@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Robot Vision</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260519-depth-reference" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260520-cycle-stats" />
   </head>
   <body>
     <header class="topbar">
@@ -35,6 +35,7 @@
             <button id="snapButton">Snap</button>
             <button id="inspectButton" class="primary">Inspect</button>
             <label class="toggle"><input id="autoSnap" type="checkbox" /> Auto</label>
+            <label class="cycle-control">Cycle ms <input id="captureCycleMs" type="number" min="100" max="10000" step="100" value="1000" /></label>
             <div class="zoom-controls" aria-label="Image zoom">
               <button id="zoomOutButton">-</button>
               <span id="zoomValue">100%</span>
@@ -45,7 +46,10 @@
         </div>
         <div id="inspectionBanner" class="inspection-banner idle">
           <strong>INSPECTION IDLE</strong>
-          <span>No inspection result yet.</span>
+          <div class="inspection-copy">
+            <span>No inspection result yet.</span>
+            <small id="measurementStats">Rolling stats: waiting for measurements.</small>
+          </div>
         </div>
         <div class="image-stage">
           <img id="rgbImage" alt="RGB camera frame" />
@@ -104,11 +108,14 @@
             <label>Pixel H <input id="pixelHeight" type="number" value="500" /></label>
             <label>Real W mm <input id="realWidth" type="number" value="400" /></label>
             <label>Real H mm <input id="realHeight" type="number" value="250" /></label>
+            <label>Depth X px <input id="depthOffsetX" type="number" step="1" value="0" /></label>
+            <label>Depth Y px <input id="depthOffsetY" type="number" step="1" value="0" /></label>
           </div>
           <div class="field-row">
             <button id="detectCalibrationButton" class="primary">Detect & Save Calibration</button>
             <button id="calibrateButton">Save Manual Pixels</button>
             <button id="depthReferenceButton">Capture Depth Zero</button>
+            <button id="depthAlignmentButton">Save Depth Align</button>
           </div>
           <p class="help-text" id="calibrationStatus">Orange: search area. Blue: detected calibration rectangle.</p>
         </section>
@@ -175,6 +182,6 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=20260519-depth-reference"></script>
+    <script src="/static/app.js?v=20260520-cycle-stats"></script>
   </body>
 </html>

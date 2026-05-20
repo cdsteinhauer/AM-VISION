@@ -136,12 +136,23 @@ button.small {
   letter-spacing: 0;
 }
 
-.inspection-banner span {
+.inspection-copy {
+  display: grid;
+  gap: 3px;
   min-width: 0;
+}
+
+.inspection-banner span {
   color: var(--muted);
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+.inspection-banner small {
+  color: #4e5a63;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .inspection-banner.pass {
@@ -251,6 +262,20 @@ button.small {
 .zoom-controls {
   gap: 4px;
   padding-left: 4px;
+}
+
+.cycle-control {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin: 0;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cycle-control input {
+  width: 78px;
+  padding: 6px;
 }
 
 .zoom-controls button {

@@ -9,6 +9,9 @@ const state = {
   lastResultTools: [],
   busy: false,
   previewTimer: null,
+  liveCaptureCycleMs: Number(window.localStorage?.getItem("robotVision.captureCycleMs") || 1000),
+  measurementStatsWindow: 50,
+  measurementSamples: [],
   trainingTimer: null,
   lastLiveDebugAt: 0,
   liveLines: {
@@ -26,6 +29,11 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+state.liveCaptureCycleMs = Math.max(
+  100,
+  Math.min(10000, Number.isFinite(state.liveCaptureCycleMs) ? state.liveCaptureCycleMs : 1000),
+);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -49,6 +57,7 @@ function setInspectionBannerIdle(message = "No inspection result yet.") {
   banner.className = "inspection-banner idle";
   banner.querySelector("strong").textContent = "INSPECTION IDLE";
   banner.querySelector("span").textContent = message;
+  updateMeasurementStatsDisplay();
 }
 
 function updateInspectionBanner(result, label = "Result") {
@@ -62,6 +71,7 @@ function updateInspectionBanner(result, label = "Result") {
   banner.className = `inspection-banner ${passed ? "pass" : "fail"}`;
   banner.querySelector("strong").textContent = `${label.toUpperCase()}: ${passed ? "PASS" : "FAIL"}`;
   banner.querySelector("span").textContent = inspectionBannerText(result);
+  updateMeasurementStatsDisplay();
 }
 
 function inspectionBannerText(result) {
@@ -125,6 +135,58 @@ function formatPercent(value) {
   return `${Math.round(Number(value) * 100)}%`;
 }
 
+function updateMeasurementStats(result) {
+  const sample = measurementSampleFromResult(result);
+  if (!sample) return;
+  state.measurementSamples.push(sample);
+  if (state.measurementSamples.length > state.measurementStatsWindow) {
+    state.measurementSamples.splice(0, state.measurementSamples.length - state.measurementStatsWindow);
+  }
+  updateMeasurementStatsDisplay();
+}
+
+function measurementSampleFromResult(result) {
+  for (const tool of result?.tools || []) {
+    const measurements = tool.measurements || {};
+    const sample = {
+      w: measurementNumber(measurements.width_mm ?? measurements.outline_width_mm),
+      h: measurementNumber(measurements.height_mm ?? measurements.outline_height_mm),
+      z: measurementNumber(measurements.depth_height_mm),
+    };
+    if (sample.w !== null || sample.h !== null || sample.z !== null) return sample;
+  }
+  return null;
+}
+
+function measurementNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function updateMeasurementStatsDisplay() {
+  const target = $("measurementStats");
+  if (!target) return;
+  if (!state.measurementSamples.length) {
+    target.textContent = "Rolling stats: waiting for measurements.";
+    return;
+  }
+  target.textContent = `Rolling n=${state.measurementSamples.length}: ${[
+    rollingMetricText("W", "w"),
+    rollingMetricText("H", "h"),
+    rollingMetricText("Z", "z"),
+  ].filter(Boolean).join(" | ")}`;
+}
+
+function rollingMetricText(label, key) {
+  const values = state.measurementSamples.map((sample) => sample[key]).filter((value) => value !== null);
+  if (!values.length) return "";
+  const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length;
+  const std = Math.sqrt(variance);
+  return `${label} avg ${avg.toFixed(2)} sd ${std.toFixed(2)} mm`;
+}
+
 function updateZoom() {
   document.documentElement.style.setProperty("--viewer-zoom", state.zoom);
   document.documentElement.style.setProperty("--viewer-pan-x", `${state.panX}px`);
@@ -153,8 +215,24 @@ function resetZoom() {
 
 function previewIntervalMs() {
   if (state.mode === "live") return 25;
-  if (state.mode === "capture") return 1000;
+  if (state.mode === "capture") return state.liveCaptureCycleMs;
   return 0;
+}
+
+function readCaptureCycleMs() {
+  const input = $("captureCycleMs");
+  const value = Number(input?.value || state.liveCaptureCycleMs);
+  return Math.max(100, Math.min(10000, Number.isFinite(value) ? value : 1000));
+}
+
+function applyCaptureCycleMs() {
+  state.liveCaptureCycleMs = readCaptureCycleMs();
+  $("captureCycleMs").value = String(state.liveCaptureCycleMs);
+  window.localStorage?.setItem("robotVision.captureCycleMs", String(state.liveCaptureCycleMs));
+  if (state.mode === "capture") {
+    setStatus("resultStatus", `Mode: Live Capture / ${state.liveCaptureCycleMs} ms`);
+    startPreviewLoop(false);
+  }
 }
 
 function startPreviewLoop(immediate = false) {
@@ -548,6 +626,7 @@ async function inspect() {
     if (data.depth_png) $("depthImage").src = `data:image/png;base64,${data.depth_png}`;
     $("resultBox").textContent = JSON.stringify(data.result, null, 2);
     setStatus("resultStatus", `Result: ${data.result.passed ? "PASS" : "FAIL"}`);
+    updateMeasurementStats(data.result);
     updateInspectionBanner(data.result, "Result");
     state.lastResultTools = data.result.tools || [];
     drawOverlay(data.result.tools || []);
@@ -679,15 +758,22 @@ function drawOverlay(tools) {
   ctx.font = "22px Segoe UI";
   activeResultToolsFrom(tools).forEach((tool) => {
     const outlineCorners = tool.measurements?.outline_corners || [];
+    const lineA = tool.measurements?.line_a;
+    const lineB = tool.measurements?.line_b;
     if (outlineCorners.length >= 4) {
       ctx.save();
       ctx.lineWidth = 3;
       ctx.strokeStyle = tool.passed ? "rgba(21, 150, 80, 0.85)" : "rgba(207, 52, 43, 0.85)";
+      ctx.fillStyle = ctx.strokeStyle;
       ctx.beginPath();
       ctx.moveTo(outlineCorners[0][0], outlineCorners[0][1]);
       outlineCorners.slice(1).forEach((point) => ctx.lineTo(point[0], point[1]));
       ctx.closePath();
       ctx.stroke();
+      if (!lineA) {
+        const labelPoint = outlineLabelPoint(outlineCorners);
+        ctx.fillText(tool.name, labelPoint.x + 8, Math.max(24, labelPoint.y - 10));
+      }
       ctx.restore();
     }
     const debugLines = tool.measurements?.debug_lines || [];
@@ -704,8 +790,6 @@ function drawOverlay(tools) {
       });
       ctx.restore();
     }
-    const lineA = tool.measurements?.line_a;
-    const lineB = tool.measurements?.line_b;
     if (lineA) {
       ctx.strokeStyle = tool.passed ? "#159650" : "#cf342b";
       ctx.fillStyle = ctx.strokeStyle;
@@ -721,12 +805,22 @@ function drawOverlay(tools) {
       return;
     }
     if (!tool.bbox_px) return;
+    if (outlineCorners.length >= 4) return;
     const [x0, y0, x1, y1] = tool.bbox_px;
     ctx.strokeStyle = tool.passed ? "#159650" : "#cf342b";
     ctx.fillStyle = ctx.strokeStyle;
     ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
     ctx.fillText(tool.name, x0 + 8, Math.max(24, y0 - 10));
   });
+}
+
+function outlineLabelPoint(corners) {
+  return corners.reduce((best, point) => {
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+    if (!best || y < best.y || (y === best.y && x < best.x)) return { x, y };
+    return best;
+  }, null) || { x: 0, y: 0 };
 }
 
 function activeResultToolsFrom(tools) {
@@ -1007,6 +1101,8 @@ async function loadCalibration(name = "default") {
     if (profile.pixel_height) $("pixelHeight").value = profile.pixel_height;
     if (profile.real_width_mm) $("realWidth").value = profile.real_width_mm;
     if (profile.real_height_mm) $("realHeight").value = profile.real_height_mm;
+    $("depthOffsetX").value = profile.depth_rgb_offset_x_px ?? 0;
+    $("depthOffsetY").value = profile.depth_rgb_offset_y_px ?? 0;
     const depthText = profile.depth_reference ? " Depth zero ready." : "";
     $("calibrationStatus").textContent = `Loaded calibration: ${Number(profile.pixels_per_mm_x).toFixed(3)} px/mm X, ${Number(profile.pixels_per_mm_y).toFixed(3)} px/mm Y.${depthText}`;
     return profile;
@@ -1068,6 +1164,19 @@ async function captureDepthReference() {
   } finally {
     state.busy = false;
   }
+}
+
+async function saveDepthAlignment() {
+  const data = await api("/api/calibration/depth-alignment", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "default",
+      offset_x_px: Number($("depthOffsetX").value),
+      offset_y_px: Number($("depthOffsetY").value),
+    }),
+  });
+  $("resultBox").textContent = JSON.stringify(data.calibration, null, 2);
+  $("calibrationStatus").textContent = `Depth align saved: X ${Number(data.calibration.depth_rgb_offset_x_px || 0).toFixed(0)} px, Y ${Number(data.calibration.depth_rgb_offset_y_px || 0).toFixed(0)} px.`;
 }
 
 async function loadReports() {
@@ -1292,7 +1401,7 @@ document.querySelectorAll(".mode-tab").forEach((button) => {
         refreshLiveLineOverlay(true).catch((error) => setStatus("resultStatus", `Line detect: ${error.message}`));
       }
     } else if (state.mode === "capture") {
-      setStatus("resultStatus", "Mode: Live Capture");
+      setStatus("resultStatus", `Mode: Live Capture / ${state.liveCaptureCycleMs} ms`);
       startPreviewLoop(true);
     } else {
       setStatus("resultStatus", "Mode: Live View");
@@ -1376,6 +1485,9 @@ $("debugDetectButton").addEventListener("click", debugDetect);
 $("zoomOutButton").addEventListener("click", () => changeZoom(-0.25));
 $("zoomInButton").addEventListener("click", () => changeZoom(0.25));
 $("zoomResetButton").addEventListener("click", resetZoom);
+$("captureCycleMs").value = String(state.liveCaptureCycleMs);
+$("captureCycleMs").addEventListener("change", applyCaptureCycleMs);
+$("captureCycleMs").addEventListener("blur", applyCaptureCycleMs);
 $("saveRecipeButton").addEventListener("click", () => saveRecipe(true));
 $("deleteRecipeButton").addEventListener("click", () => deleteRecipe().catch((error) => {
   $("resultBox").textContent = `Delete recipe failed: ${error.message}`;
@@ -1391,6 +1503,10 @@ $("detectCalibrationButton").addEventListener("click", () => detectCalibration()
 }));
 $("depthReferenceButton").addEventListener("click", () => captureDepthReference().catch((error) => {
   $("calibrationStatus").textContent = `Depth zero failed: ${error.message}`;
+  setStatus("resultStatus", "Calibration: failed");
+}));
+$("depthAlignmentButton").addEventListener("click", () => saveDepthAlignment().catch((error) => {
+  $("calibrationStatus").textContent = `Depth align failed: ${error.message}`;
   setStatus("resultStatus", "Calibration: failed");
 }));
 $("refreshCameraSettingsButton").addEventListener("click", loadCameraSettings);

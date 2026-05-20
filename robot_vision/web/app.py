@@ -60,6 +60,12 @@ class DepthReferencePayload(BaseModel):
     roi: list[float] = Field(min_length=4, max_length=4)
 
 
+class DepthAlignmentPayload(BaseModel):
+    name: str = "default"
+    offset_x_px: float = 0.0
+    offset_y_px: float = 0.0
+
+
 class CameraSettingsPayload(BaseModel):
     settings: dict[str, Any]
 
@@ -167,7 +173,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     def snapshot():
         frame = _snapshot_or_error(camera, camera_lock)
         depth_display = depth_to_display(frame.depth)
-        trigger_result = trigger.update(frame.rgb)
+        trigger_result = trigger.update(frame.rgb, frame.depth)
         return {
             "sequence": frame.sequence,
             "timestamp": frame.timestamp,
@@ -182,7 +188,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         process_trigger: bool = False,
     ):
         frame = _snapshot_or_error(camera, camera_lock)
-        trigger_result = trigger.update(frame.rgb) if process_trigger else {"fired": False, "score": 0.0}
+        trigger_result = trigger.update(frame.rgb, frame.depth) if process_trigger else {"fired": False, "score": 0.0}
         depth_display = depth_to_display(frame.depth) if view == "depth" else None
         return {
             "sequence": frame.sequence,
@@ -317,6 +323,17 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "rgb_png": encode_png_base64(frame.rgb),
             "depth_png": encode_png_base64(depth_to_display(frame.depth)) if frame.depth is not None else None,
         }
+
+    @app.post("/api/calibration/depth-alignment")
+    def save_depth_alignment(payload: DepthAlignmentPayload):
+        try:
+            profile = calibration.load(payload.name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        profile.depth_rgb_offset_x_px = payload.offset_x_px
+        profile.depth_rgb_offset_y_px = payload.offset_y_px
+        path = calibration.save(profile)
+        return {"saved": True, "path": str(path), "calibration": profile.to_dict()}
 
     @app.post("/api/inspect")
     def inspect(payload: InspectRequest):

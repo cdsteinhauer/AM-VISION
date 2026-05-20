@@ -8,6 +8,7 @@ from robot_vision.inspection.calibration import CalibrationProfile, DepthReferen
 from robot_vision.inspection.engine import (
     InspectionEngine,
     debug_candidate_lines,
+    detect_depth_rectangle_in_roi,
     detect_parallel_line_pair,
     detect_part_outline_in_roi,
     detect_rectangle_in_roi,
@@ -119,9 +120,35 @@ def test_part_outline_handles_slight_rotation():
     outline = detect_part_outline_in_roi(image, (0.25, 0.25, 0.6, 0.6))
 
     assert outline is not None
+    assert outline.width_px == outline.long_side_px
+    assert outline.height_px == outline.short_side_px
     assert 49 <= outline.long_side_px <= 55
     assert 24 <= outline.short_side_px <= 30
     assert abs(outline.angle_deg) >= 3
+
+
+def test_rectangle_measurement_uses_oriented_sides_for_rotated_part():
+    try:
+        import cv2
+    except Exception:
+        return
+    image = np.full((160, 180, 3), 50, dtype=np.uint8)
+    box = cv2.boxPoints(((90, 80), (56, 28), 42))
+    cv2.fillPoly(image, [box.astype(np.int32)], (205, 205, 205))
+    calibration = CalibrationProfile(pixels_per_mm_x=1.0, pixels_per_mm_y=1.0)
+    tool = InspectionTool.from_dict({
+        "id": "rotated",
+        "name": "Rotated rectangle",
+        "type": "rectangle",
+        "roi": [0.15, 0.15, 0.7, 0.7],
+    })
+
+    result = InspectionEngine()._inspect_rectangle(image, tool, calibration)
+
+    assert result.passed is True
+    assert 53 <= result.measurements["width_mm"] <= 59
+    assert 25 <= result.measurements["height_mm"] <= 31
+    assert result.measurements["width_mm"] > result.measurements["height_mm"]
 
 
 def test_parallel_line_pair_detection_reports_average_length():
@@ -207,6 +234,139 @@ def test_depth_height_uses_reference_plane_when_calibrated():
     assert result.measurements["depth_method"] == "reference_plane"
     assert result.measurements["depth_height_mm"] == 50.0
     assert result.measurements["depth_reference_mm"] > result.measurements["depth_top_mm"]
+
+
+def test_depth_rectangle_detection_finds_part_when_rgb_is_flat():
+    image_shape = (120, 160)
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.2 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+    )
+
+    detection = detect_depth_rectangle_in_roi(depth, (0.35, 0.35, 0.5, 0.4), image_shape, calibration)
+
+    assert detection is not None
+    assert detection.bbox_px == (70, 52, 119, 77)
+    assert detection.width_px == 50.0
+    assert detection.height_px == 26.0
+
+
+def test_rectangle_tool_uses_depth_detection_when_rgb_has_no_outline():
+    image = np.full((120, 160, 3), 80, dtype=np.uint8)
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.2 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+    )
+    tool = InspectionTool.from_dict({
+        "id": "depth_rect",
+        "name": "Depth rectangle",
+        "type": "rectangle",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+    })
+
+    result = InspectionEngine()._inspect_rectangle(image, tool, calibration, depth)
+
+    assert result.passed is True
+    assert result.measurements["detection_method"] == "depth_reference"
+    assert result.measurements["depth_method"] == "reference_plane"
+    assert result.measurements["depth_height_mm"] == 45.0
+    assert result.bbox_px == (70, 52, 119, 77)
+
+
+def test_depth_detection_offset_moves_overlay_without_moving_height_sample():
+    image = np.full((120, 160, 3), 80, dtype=np.uint8)
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.2 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+        depth_rgb_offset_x_px=-10.0,
+        depth_rgb_offset_y_px=7.0,
+    )
+    tool = InspectionTool.from_dict({
+        "id": "depth_rect",
+        "name": "Depth rectangle",
+        "type": "rectangle",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+    })
+
+    result = InspectionEngine()._inspect_rectangle(image, tool, calibration, depth)
+
+    assert result.bbox_px == (60, 59, 109, 84)
+    assert result.measurements["depth_height_mm"] == 45.0
+    assert result.measurements["depth_rgb_offset_x_px"] == -10.0
+    assert result.measurements["depth_rgb_offset_y_px"] == 7.0
+
+
+def test_rectangle_tool_prefers_rgb_overlay_when_rgb_can_see_part():
+    image = np.full((120, 160, 3), 80, dtype=np.uint8)
+    image[52:78, 70:120] = 205
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.2 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+        depth_rgb_offset_x_px=-10.0,
+        depth_rgb_offset_y_px=7.0,
+    )
+    tool = InspectionTool.from_dict({
+        "id": "hybrid_rect",
+        "name": "Hybrid rectangle",
+        "type": "rectangle",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+    })
+
+    result = InspectionEngine()._inspect_rectangle(image, tool, calibration, depth)
+
+    assert result.measurements["detection_method"] == "rgb"
+    assert result.bbox_px == (70, 52, 119, 77)
+    assert result.measurements["depth_height_mm"] == 45.0
+    assert result.measurements["depth_rgb_offset_x_px"] == -10.0
+    assert result.measurements["depth_rgb_offset_y_px"] == 7.0
+
+
+def test_edge_tool_uses_depth_outline_when_rgb_has_no_outline():
+    image = np.full((120, 160, 3), 80, dtype=np.uint8)
+    yy, xx = np.mgrid[0:120, 0:160]
+    reference_depth = 900.0 + xx * 0.2 + yy * 0.1
+    depth = reference_depth.astype(np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(
+        pixels_per_mm_x=1.0,
+        pixels_per_mm_y=1.0,
+        depth_reference=DepthReference.from_depth(reference_depth.astype(np.float32)),
+    )
+    tool = InspectionTool.from_dict({
+        "id": "depth_edge",
+        "name": "Depth edge",
+        "type": "edge_2",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+        "min_edge_score": 1,
+        "min_line_length_ratio": 0.05,
+    })
+
+    result = InspectionEngine()._inspect_edge(image, tool, calibration, depth)
+
+    assert result.passed is True
+    assert result.measurements["detection_method"] == "depth_reference"
+    assert result.measurements["depth_height_mm"] == 45.0
+    assert result.measurements["average_length_mm"] == 50.0
 
 
 def test_debug_candidate_lines_returns_hough_candidates():

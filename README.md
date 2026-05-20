@@ -124,7 +124,10 @@ Current Jetson hardware status:
 3. Create or edit inspection tools in the recipe panel.
 4. Save calibration using a known plate/grid/rectangle.
 5. With the fixture empty, use `Capture Depth Zero` to save the table/fixture plane used for depth height.
+   After depth zero is saved, rectangle and edge tools prefer depth-difference part detection before falling back to RGB contrast.
+   If the green depth-detected overlay is offset from the RGB part, adjust `Depth X px` and `Depth Y px`, then save depth alignment.
 6. Press `Inspect`, or use `Live Capture` with `Auto`.
+   Use `Cycle ms` to set the Live Capture preview/trigger interval. The result banner keeps a rolling average and standard deviation for incoming W/H/Z measurements.
 7. Review pass/fail, dimensions, overlays, and saved reports.
 
 Reports are written under:
