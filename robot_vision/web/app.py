@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 from threading import Lock
@@ -70,6 +71,11 @@ class CameraSettingsPayload(BaseModel):
     settings: dict[str, Any]
 
 
+class CameraModePayload(BaseModel):
+    mode: str = Field(pattern="^(astra|global_shutter)$")
+    device_index: int = Field(default=0, ge=0)
+
+
 class LineDetectPayload(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -97,7 +103,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     paths = DataPaths(cfg.data_dir)
     paths.ensure()
 
-    camera = create_camera(cfg.camera)
+    camera_config = cfg.camera
+    camera = create_camera(camera_config)
     camera_lock = Lock()
     recipes = RecipeStore(paths.recipes)
     calibration = CalibrationStore(paths.calibration)
@@ -140,7 +147,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "ok": True,
             "app": "robot_vision",
             "ros_domain_id": cfg.ros_domain_id,
-            "camera_provider": cfg.camera.provider,
+            "camera_provider": camera_config.provider,
         }
 
     @app.get("/api/camera/status")
@@ -148,7 +155,61 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         try:
             return camera.status()
         except Exception as exc:
-            return {"provider": cfg.camera.provider, "started": False, "error": str(exc)}
+            return {"provider": camera_config.provider, "started": False, "error": str(exc)}
+
+    @app.get("/api/camera/mode")
+    def camera_mode():
+        mode = "global_shutter" if camera_config.provider == "opencv" else "astra"
+        return {
+            "mode": mode,
+            "provider": camera_config.provider,
+            "device_index": camera_config.device_index,
+            "depth_enabled": camera_config.depth_enabled,
+        }
+
+    @app.post("/api/camera/mode")
+    def update_camera_mode(payload: CameraModePayload):
+        nonlocal camera, camera_config
+        if payload.mode == "global_shutter":
+            next_config = replace(
+                camera_config,
+                provider="opencv",
+                device_index=payload.device_index,
+                width=1280,
+                height=720,
+                fps=120,
+                auto_exposure=True,
+                exposure=-1,
+                gain=0,
+                depth_enabled=False,
+            )
+        else:
+            next_config = replace(
+                camera_config,
+                provider="astra_hybrid",
+                device_index=0,
+                width=1280,
+                height=720,
+                fps=15,
+                auto_exposure=True,
+                exposure=-1,
+                gain=-1,
+                depth_enabled=True,
+            )
+        try:
+            with camera_lock:
+                if hasattr(camera, "stop"):
+                    camera.stop()
+                camera_config = next_config
+                camera = create_camera(camera_config)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "mode": "global_shutter" if camera_config.provider == "opencv" else "astra",
+            "provider": camera_config.provider,
+            "device_index": camera_config.device_index,
+            "depth_enabled": camera_config.depth_enabled,
+        }
 
     @app.get("/api/camera/settings")
     def camera_settings():

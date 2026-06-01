@@ -122,6 +122,15 @@
 
         <section id="cameraPanel" class="panel-page">
           <h2>Camera Settings</h2>
+          <label>Camera mode <select id="cameraModeSelect">
+            <option value="astra">Astra RGB + Depth</option>
+            <option value="global_shutter">Single Global Shutter</option>
+          </select></label>
+          <label>Global shutter device <input id="globalShutterDeviceIndex" type="number" min="0" step="1" value="0" /></label>
+          <div class="field-row">
+            <button id="applyCameraModeButton" class="primary">Apply Camera Mode</button>
+          </div>
+          <p class="help-text" id="cameraModeStatus">Camera mode: loading...</p>
           <div id="cameraSettings" class="settings-list">Loading camera settings...</div>
           <div class="field-row">
             <button id="refreshCameraSettingsButton">Refresh</button>

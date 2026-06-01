@@ -274,6 +274,37 @@ async function loadCameraSettings() {
   }
 }
 
+async function loadCameraMode() {
+  const data = await api("/api/camera/mode");
+  $("cameraModeSelect").value = data.mode;
+  $("globalShutterDeviceIndex").value = String(data.device_index ?? 0);
+  $("globalShutterDeviceIndex").disabled = data.mode !== "global_shutter";
+  $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
+  return data;
+}
+
+async function applyCameraMode() {
+  const mode = $("cameraModeSelect").value;
+  const deviceIndex = Number($("globalShutterDeviceIndex").value || 0);
+  $("cameraModeStatus").textContent = "Camera mode: switching...";
+  const data = await api("/api/camera/mode", {
+    method: "POST",
+    body: JSON.stringify({ mode, device_index: deviceIndex }),
+  });
+  $("cameraModeSelect").value = data.mode;
+  $("globalShutterDeviceIndex").value = String(data.device_index ?? 0);
+  $("globalShutterDeviceIndex").disabled = data.mode !== "global_shutter";
+  $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
+  state.lastResultTools = [];
+  state.lastSnapshot = null;
+  drawOverlay([]);
+  await refreshHealth();
+  await loadCameraSettings();
+  if (state.mode !== "snap") {
+    startPreviewLoop(true);
+  }
+}
+
 function renderCameraSettings(controls) {
   const container = $("cameraSettings");
   container.innerHTML = "";
@@ -1511,6 +1542,12 @@ $("depthAlignmentButton").addEventListener("click", () => saveDepthAlignment().c
 }));
 $("refreshCameraSettingsButton").addEventListener("click", loadCameraSettings);
 $("applyCameraSettingsButton").addEventListener("click", () => applyCameraSettings().catch((error) => setStatus("cameraStatus", `Settings: ${error.message}`)));
+$("cameraModeSelect").addEventListener("change", () => {
+  $("globalShutterDeviceIndex").disabled = $("cameraModeSelect").value !== "global_shutter";
+});
+$("applyCameraModeButton").addEventListener("click", () => applyCameraMode().catch((error) => {
+  $("cameraModeStatus").textContent = `Camera mode failed: ${error.message}`;
+}));
 $("refreshTrainingButton").addEventListener("click", () => refreshTrainingSamples().catch((error) => {
   $("trainingStatus").textContent = `Training samples failed: ${error.message}`;
 }));
@@ -1558,6 +1595,7 @@ updateZoom();
 loadRecipes()
   .then(loadReports)
   .then(loadCalibration)
+  .then(loadCameraMode)
   .then(loadCameraSettings)
   .then(refreshTrainingDependencies)
   .then(loadTrainingFolder)

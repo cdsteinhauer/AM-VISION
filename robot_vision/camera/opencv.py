@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -82,7 +83,25 @@ class OpenCVCamera:
 
         if self.capture is not None:
             return
-        self.capture = cv2.VideoCapture(self.config.device_index, cv2.CAP_V4L2)
+        device_path = self._device_path()
+        if not Path(device_path).exists():
+            raise RuntimeError(f"OpenCV camera device does not exist: {device_path}")
+        errors = []
+        for target, backend, label in (
+            (device_path, cv2.CAP_V4L2, f"{device_path} via V4L2"),
+            (self.config.device_index, cv2.CAP_V4L2, f"index {self.config.device_index} via V4L2"),
+            (self.config.device_index, cv2.CAP_ANY, f"index {self.config.device_index} via any backend"),
+        ):
+            capture = cv2.VideoCapture(target, backend)
+            if capture.isOpened():
+                self.capture = capture
+                break
+            capture.release()
+            errors.append(label)
+        if self.capture is None:
+            raise RuntimeError(
+                f"OpenCV could not open camera {device_path}. Tried: {', '.join(errors)}"
+            )
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
@@ -92,8 +111,6 @@ class OpenCVCamera:
             self.capture.set(cv2.CAP_PROP_EXPOSURE, self.config.exposure)
         if self.config.gain >= 0:
             self.capture.set(cv2.CAP_PROP_GAIN, self.config.gain)
-        if not self.capture.isOpened():
-            raise RuntimeError(f"OpenCV could not open camera index {self.config.device_index}")
         self._stop_event.clear()
         self._read_error = None
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
