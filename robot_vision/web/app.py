@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import shutil
+import time
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from robot_vision.camera import create_camera
 from robot_vision.camera.base import depth_to_display, encode_jpeg_base64, encode_png_base64
+from robot_vision.camera.opencv import list_video_devices, select_camera_device_index
 from robot_vision.config import AppConfig, load_config
 from robot_vision.inspection.calibration import CalibrationProfile, DepthReference
 from robot_vision.inspection.engine import InspectionEngine, debug_candidate_lines_in_roi, detect_rectangle_in_roi
@@ -73,7 +75,7 @@ class CameraSettingsPayload(BaseModel):
 
 class CameraModePayload(BaseModel):
     mode: str = Field(pattern="^(astra|global_shutter)$")
-    device_index: int = Field(default=0, ge=0)
+    device_index: int = -1
 
 
 class LineDetectPayload(BaseModel):
@@ -103,7 +105,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     paths = DataPaths(cfg.data_dir)
     paths.ensure()
 
-    camera_config = cfg.camera
+    camera_config = _resolve_auto_camera_config(cfg.camera)
     camera = create_camera(camera_config)
     camera_lock = Lock()
     recipes = RecipeStore(paths.recipes)
@@ -153,7 +155,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/api/camera/status")
     def camera_status():
         try:
-            return camera.status()
+            status = camera.status()
+            status["available_devices"] = [
+                {"index": device.index, "path": device.path, "label": device.label}
+                for device in list_video_devices()
+            ]
+            return status
         except Exception as exc:
             return {"provider": camera_config.provider, "started": False, "error": str(exc)}
 
@@ -170,36 +177,40 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/api/camera/mode")
     def update_camera_mode(payload: CameraModePayload):
         nonlocal camera, camera_config
-        if payload.mode == "global_shutter":
-            next_config = replace(
-                camera_config,
-                provider="opencv",
-                device_index=payload.device_index,
-                width=1280,
-                height=720,
-                fps=120,
-                auto_exposure=True,
-                exposure=-1,
-                gain=0,
-                depth_enabled=False,
-            )
-        else:
-            next_config = replace(
-                camera_config,
-                provider="astra_hybrid",
-                device_index=0,
-                width=1280,
-                height=720,
-                fps=15,
-                auto_exposure=True,
-                exposure=-1,
-                gain=-1,
-                depth_enabled=True,
-            )
         try:
+            preferred_index = payload.device_index if payload.device_index >= 0 else None
+            if payload.mode == "global_shutter":
+                device_index = select_camera_device_index("global_shutter", preferred_index)
+                next_config = replace(
+                    camera_config,
+                    provider="opencv",
+                    device_index=device_index,
+                    width=1280,
+                    height=720,
+                    fps=120,
+                    auto_exposure=True,
+                    exposure=-1,
+                    gain=0,
+                    depth_enabled=False,
+                )
+            else:
+                device_index = select_camera_device_index("astra", preferred_index)
+                next_config = replace(
+                    camera_config,
+                    provider="astra_hybrid",
+                    device_index=device_index,
+                    width=1280,
+                    height=720,
+                    fps=15,
+                    auto_exposure=True,
+                    exposure=-1,
+                    gain=-1,
+                    depth_enabled=True,
+                )
             with camera_lock:
                 if hasattr(camera, "stop"):
                     camera.stop()
+                time.sleep(0.25)
                 camera_config = next_config
                 camera = create_camera(camera_config)
         except Exception as exc:
@@ -638,6 +649,20 @@ def _snapshot_or_error(camera, camera_lock: Lock):
             return camera.snapshot()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _resolve_auto_camera_config(camera_config):
+    if camera_config.device_index >= 0:
+        return camera_config
+    provider = camera_config.provider.lower()
+    try:
+        if provider == "opencv":
+            return replace(camera_config, device_index=select_camera_device_index("global_shutter"))
+        if provider in {"astra_hybrid", "hybrid_astra", "rgbd_astra"}:
+            return replace(camera_config, device_index=select_camera_device_index("astra"))
+    except Exception:
+        return camera_config
+    return camera_config
 
 
 def _training_subprocess_code() -> str:

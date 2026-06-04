@@ -277,23 +277,20 @@ async function loadCameraSettings() {
 async function loadCameraMode() {
   const data = await api("/api/camera/mode");
   $("cameraModeSelect").value = data.mode;
-  $("globalShutterDeviceIndex").value = String(data.device_index ?? 0);
-  $("globalShutterDeviceIndex").disabled = data.mode !== "global_shutter";
+  $("cameraDeviceStatus").textContent = `Camera device: /dev/video${data.device_index ?? 0}`;
   $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
   return data;
 }
 
 async function applyCameraMode() {
   const mode = $("cameraModeSelect").value;
-  const deviceIndex = Number($("globalShutterDeviceIndex").value || 0);
-  $("cameraModeStatus").textContent = "Camera mode: switching...";
+  $("cameraModeStatus").textContent = "Camera mode: finding device...";
   const data = await api("/api/camera/mode", {
     method: "POST",
-    body: JSON.stringify({ mode, device_index: deviceIndex }),
+    body: JSON.stringify({ mode }),
   });
   $("cameraModeSelect").value = data.mode;
-  $("globalShutterDeviceIndex").value = String(data.device_index ?? 0);
-  $("globalShutterDeviceIndex").disabled = data.mode !== "global_shutter";
+  $("cameraDeviceStatus").textContent = `Camera device: /dev/video${data.device_index ?? 0}`;
   $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
   state.lastResultTools = [];
   state.lastSnapshot = null;
@@ -1542,9 +1539,6 @@ $("depthAlignmentButton").addEventListener("click", () => saveDepthAlignment().c
 }));
 $("refreshCameraSettingsButton").addEventListener("click", loadCameraSettings);
 $("applyCameraSettingsButton").addEventListener("click", () => applyCameraSettings().catch((error) => setStatus("cameraStatus", `Settings: ${error.message}`)));
-$("cameraModeSelect").addEventListener("change", () => {
-  $("globalShutterDeviceIndex").disabled = $("cameraModeSelect").value !== "global_shutter";
-});
 $("applyCameraModeButton").addEventListener("click", () => applyCameraMode().catch((error) => {
   $("cameraModeStatus").textContent = `Camera mode failed: ${error.message}`;
 }));

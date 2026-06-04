@@ -27,6 +27,13 @@ class CameraControl:
     options: dict[int, str] | None = None
 
 
+@dataclass(frozen=True)
+class VideoDevice:
+    index: int
+    path: str
+    label: str
+
+
 CONTROL_LABELS = {
     "brightness": "Brightness",
     "contrast": "Contrast",
@@ -77,42 +84,24 @@ class OpenCVCamera:
         self._latest_bgr: np.ndarray | None = None
         self._latest_timestamp = 0.0
         self._read_error: str | None = None
+        self._read_failures = 0
+        self._reconnecting = False
+        self._reconnects = 0
+        self._open_label: str | None = None
 
     def start(self) -> None:
         import cv2
 
         if self.capture is not None:
             return
-        device_path = self._device_path()
-        if not Path(device_path).exists():
-            raise RuntimeError(f"OpenCV camera device does not exist: {device_path}")
-        errors = []
-        for target, backend, label in (
-            (device_path, cv2.CAP_V4L2, f"{device_path} via V4L2"),
-            (self.config.device_index, cv2.CAP_V4L2, f"index {self.config.device_index} via V4L2"),
-            (self.config.device_index, cv2.CAP_ANY, f"index {self.config.device_index} via any backend"),
-        ):
-            capture = cv2.VideoCapture(target, backend)
-            if capture.isOpened():
-                self.capture = capture
-                break
-            capture.release()
-            errors.append(label)
-        if self.capture is None:
-            raise RuntimeError(
-                f"OpenCV could not open camera {device_path}. Tried: {', '.join(errors)}"
-            )
-        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
-        self.capture.set(cv2.CAP_PROP_FPS, self.config.fps)
-        if self.config.exposure >= 0:
-            self.capture.set(cv2.CAP_PROP_EXPOSURE, self.config.exposure)
-        if self.config.gain >= 0:
-            self.capture.set(cv2.CAP_PROP_GAIN, self.config.gain)
+        capture, label = self._open_capture()
+        self._configure_capture(capture)
+        self.capture = capture
+        self._open_label = label
         self._stop_event.clear()
         self._read_error = None
+        self._read_failures = 0
+        self._reconnecting = False
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
 
@@ -131,20 +120,20 @@ class OpenCVCamera:
         if self.capture is None:
             self.start()
         deadline = time.time() + 2.0
+        minimum_timestamp = time.time() - 1.0
         bgr = None
         timestamp = 0.0
+        read_error = None
         while time.time() < deadline:
             with self._lock:
-                if self._latest_bgr is not None:
+                if self._latest_bgr is not None and self._latest_timestamp >= minimum_timestamp:
                     bgr = self._latest_bgr.copy()
                     timestamp = self._latest_timestamp
                     break
                 read_error = self._read_error
-            if read_error:
-                raise RuntimeError(read_error)
             time.sleep(0.01)
         if bgr is None:
-            raise RuntimeError("Timed out waiting for OpenCV camera frame")
+            raise RuntimeError(read_error or "Timed out waiting for OpenCV camera frame")
         self.sequence += 1
         rgb = bgr[:, :, ::-1].copy()
         return Frame(rgb=rgb, depth=None, sequence=self.sequence, timestamp=timestamp or time.time())
@@ -161,6 +150,11 @@ class OpenCVCamera:
             "depth": False,
             "backend": "v4l2",
             "latest_frame_age_s": round(max(0.0, time.time() - self._latest_timestamp), 3) if self._latest_timestamp else None,
+            "read_failures": self._read_failures,
+            "read_error": self._read_error,
+            "reconnecting": self._reconnecting,
+            "reconnects": self._reconnects,
+            "open_label": self._open_label,
         }
 
     def get_settings(self) -> dict[str, Any]:
@@ -218,20 +212,89 @@ class OpenCVCamera:
             with self._lock:
                 capture = self.capture
             if capture is None:
-                break
+                self._reconnect_capture()
+                continue
             ok, bgr = capture.read()
             if not ok:
                 with self._lock:
-                    self._read_error = "OpenCV camera read failed"
+                    self._read_failures += 1
+                    if self._read_failures >= 20:
+                        self._read_error = "OpenCV camera read failed; reconnecting"
+                if self._read_failures >= 20:
+                    self._reconnect_capture()
                 time.sleep(0.05)
                 continue
             with self._lock:
                 self._latest_bgr = bgr
                 self._latest_timestamp = time.time()
                 self._read_error = None
+                self._read_failures = 0
 
     def _device_path(self) -> str:
         return f"/dev/video{self.config.device_index}"
+
+    def _open_capture(self):
+        import cv2
+
+        device_path = self._device_path()
+        if not Path(device_path).exists():
+            raise RuntimeError(f"OpenCV camera device does not exist: {device_path}")
+        errors = []
+        for target, backend, label in (
+            (device_path, cv2.CAP_V4L2, f"{device_path} via V4L2"),
+            (self.config.device_index, cv2.CAP_V4L2, f"index {self.config.device_index} via V4L2"),
+            (self.config.device_index, cv2.CAP_ANY, f"index {self.config.device_index} via any backend"),
+        ):
+            capture = cv2.VideoCapture(target, backend)
+            if capture.isOpened():
+                return capture, label
+            capture.release()
+            errors.append(label)
+        raise RuntimeError(f"OpenCV could not open camera {device_path}. Tried: {', '.join(errors)}")
+
+    def _configure_capture(self, capture) -> None:
+        import cv2
+
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
+        capture.set(cv2.CAP_PROP_FPS, self.config.fps)
+        if self.config.exposure >= 0:
+            capture.set(cv2.CAP_PROP_EXPOSURE, self.config.exposure)
+        if self.config.gain >= 0:
+            capture.set(cv2.CAP_PROP_GAIN, self.config.gain)
+
+    def _reconnect_capture(self) -> None:
+        with self._lock:
+            if self._reconnecting or self._stop_event.is_set():
+                return
+            self._reconnecting = True
+            old_capture = self.capture
+            self.capture = None
+            self._latest_bgr = None
+        if old_capture is not None:
+            old_capture.release()
+        time.sleep(0.2)
+        try:
+            capture, label = self._open_capture()
+            self._configure_capture(capture)
+        except Exception as exc:
+            with self._lock:
+                self._read_error = f"OpenCV camera reconnect failed: {exc}"
+                self._reconnecting = False
+            return
+        with self._lock:
+            if self._stop_event.is_set():
+                capture.release()
+                self._reconnecting = False
+                return
+            self.capture = capture
+            self._open_label = label
+            self._read_error = None
+            self._read_failures = 0
+            self._reconnecting = False
+            self._reconnects += 1
 
     @staticmethod
     def _has_v4l2_ctl() -> bool:
@@ -327,3 +390,79 @@ def _coerce_control_value(control: CameraControl, value: Any) -> int:
     if control.maximum is not None and coerced > control.maximum:
         raise ValueError(f"Value above maximum {control.maximum}")
     return coerced
+
+
+def select_camera_device_index(camera_kind: str, preferred_index: int | None = None) -> int:
+    if preferred_index is not None and preferred_index >= 0:
+        return preferred_index
+    devices = list_video_devices()
+    if not devices:
+        raise RuntimeError("No /dev/video camera devices were found")
+    scored = sorted(
+        devices,
+        key=lambda device: (_device_score(camera_kind, device), -device.index),
+        reverse=True,
+    )
+    return scored[0].index
+
+
+def list_video_devices() -> list[VideoDevice]:
+    devices = _list_v4l2_devices()
+    if devices:
+        return devices
+    found = []
+    for path in sorted(Path("/dev").glob("video*"), key=lambda item: _video_index(item.name) or 999):
+        index = _video_index(path.name)
+        if index is not None:
+            found.append(VideoDevice(index=index, path=str(path), label=path.name))
+    return found
+
+
+def _list_v4l2_devices() -> list[VideoDevice]:
+    if shutil.which("v4l2-ctl") is None:
+        return []
+    result = subprocess.run(
+        ["v4l2-ctl", "--list-devices"],
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    devices: list[VideoDevice] = []
+    label = ""
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        if not line.startswith("\t") and not line.startswith(" "):
+            label = line.rstrip(":")
+            continue
+        path = line.strip()
+        index = _video_index(Path(path).name)
+        if index is not None:
+            devices.append(VideoDevice(index=index, path=path, label=label))
+    return devices
+
+
+def _video_index(name: str) -> int | None:
+    match = re.fullmatch(r"video(\d+)", name)
+    return int(match.group(1)) if match else None
+
+
+def _device_score(camera_kind: str, device: VideoDevice) -> int:
+    label = device.label.lower()
+    astra_terms = ("astra", "orbbec", "gemini", "depth")
+    global_terms = ("global", "shutter", "arducam", "flir", "basler", "imx", "machine vision")
+    if camera_kind == "astra":
+        if any(term in label for term in astra_terms):
+            return 100
+        if any(term in label for term in global_terms):
+            return 10
+        return 50
+    if any(term in label for term in global_terms):
+        return 100
+    if any(term in label for term in astra_terms):
+        return 10
+    return 60
