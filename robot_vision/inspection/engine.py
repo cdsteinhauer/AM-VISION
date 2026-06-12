@@ -87,10 +87,11 @@ class InspectionEngine:
         messages: list[str] = []
         rgb_detection = detect_rectangle_in_roi(image, tool.roi)
         depth_detection = detect_depth_rectangle_in_roi(depth, tool.roi, image.shape[:2], calibration)
-        detection = _rectangle_with_depth_sample(rgb_detection, depth_detection)
-        detection_method = "rgb" if rgb_detection is not None else "depth_reference"
-        if detection is None:
-            detection = depth_detection
+        detection, detection_method = _select_rectangle_detection(
+            rgb_detection,
+            depth_detection,
+            has_depth_reference=calibration.depth_reference is not None,
+        )
         if detection is None:
             return ToolResult(tool.id, tool.name, False, {}, None, ["No rectangular part found in detection area"])
 
@@ -355,6 +356,37 @@ def _rectangle_with_depth_sample(
     )
 
 
+def _select_rectangle_detection(
+    rgb_detection: RectangleDetection | None,
+    depth_detection: RectangleDetection | None,
+    *,
+    has_depth_reference: bool,
+) -> tuple[RectangleDetection | None, str]:
+    if depth_detection is not None and _spans_search_axis(depth_detection):
+        depth_detection = None
+    if rgb_detection is None:
+        return depth_detection, _depth_detection_method(depth_detection, has_depth_reference)
+    if depth_detection is None:
+        return rgb_detection, "rgb"
+    if _spans_search_axis(rgb_detection):
+        return depth_detection, _depth_detection_method(depth_detection, has_depth_reference)
+    return _rectangle_with_depth_sample(rgb_detection, depth_detection), "rgb"
+
+
+def _depth_detection_method(detection: RectangleDetection | None, has_depth_reference: bool) -> str:
+    if detection is None:
+        return "depth_reference"
+    return "depth_reference" if has_depth_reference else "depth_local"
+
+
+def _spans_search_axis(detection: RectangleDetection) -> bool:
+    x, y, w, h = detection.search_area_px
+    x0, y0, x1, y1 = detection.bbox_px
+    width_span = x0 <= x + 1 and x1 >= x + w - 2 and detection.height_px < h * 0.95
+    height_span = y0 <= y + 1 and y1 >= y + h - 2 and detection.width_px < w * 0.95
+    return bool(width_span or height_span)
+
+
 def _outline_with_depth_sample(
     rgb_outline: PartOutlineDetection | None,
     depth_outline: PartOutlineDetection | None,
@@ -417,13 +449,16 @@ def detect_depth_part_outline_in_roi(
     image_shape: tuple[int, int],
     calibration: CalibrationProfile,
 ) -> PartOutlineDetection | None:
-    if depth is None or depth.ndim != 2 or calibration.depth_reference is None:
+    if depth is None or depth.ndim != 2:
         return None
     image_height, image_width = image_shape
     image_search = _roi_pixels(roi, image_width, image_height)
     depth_search = _scale_search_to_depth(image_search, image_width, image_height, depth.shape[1], depth.shape[0])
     x0, y0, x1, y1 = depth_search
-    height_map, valid = _reference_height_map(depth, calibration, depth_search)
+    if calibration.depth_reference is None:
+        height_map, valid = _local_height_map(depth, depth_search)
+    else:
+        height_map, valid = _reference_height_map(depth, calibration, depth_search)
     threshold = _depth_detection_threshold_mm(calibration)
     mask = valid & (height_map >= threshold)
     if not np.any(mask):
@@ -917,6 +952,33 @@ def _reference_height_map(
         & (reference_mm > 0)
     )
     return reference_mm - observed_mm, valid
+
+
+def _local_height_map(
+    depth: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    crop = _crop_depth(depth, box)
+    observed_mm = depth_array_to_mm(crop)
+    valid = np.isfinite(crop) & (crop > 0)
+    if not np.any(valid):
+        return np.zeros(crop.shape, dtype=np.float64), np.zeros(crop.shape, dtype=bool)
+
+    height, width = crop.shape
+    border = max(2, min(height, width) // 8)
+    border_mask = np.zeros(crop.shape, dtype=bool)
+    border_mask[:border, :] = True
+    border_mask[-border:, :] = True
+    border_mask[:, :border] = True
+    border_mask[:, -border:] = True
+    background_values = observed_mm[valid & border_mask]
+    if background_values.size < 25:
+        background_values = observed_mm[valid]
+    if background_values.size < 25:
+        return np.zeros(crop.shape, dtype=np.float64), np.zeros(crop.shape, dtype=bool)
+
+    background_mm = float(np.median(background_values))
+    return background_mm - observed_mm, valid
 
 
 def _depth_detection_threshold_mm(calibration: CalibrationProfile) -> float:
@@ -1759,7 +1821,7 @@ def _roi_pixels(roi: tuple[float, float, float, float], width: int, height: int)
 
 
 def _detection_messages(messages: list[str], detection_method: str) -> list[str]:
-    prefix = "Depth part detected" if detection_method == "depth_reference" else "RGB outline detected"
+    prefix = "Depth part detected" if detection_method.startswith("depth_") else "RGB outline detected"
     return [prefix, *messages]
 
 

@@ -107,12 +107,14 @@ class OpenCVCamera:
 
     def stop(self) -> None:
         self._stop_event.set()
+        with self._lock:
+            capture = self.capture
+            self.capture = None
+        if capture is not None:
+            capture.release()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
-        if self.capture is not None:
-            self.capture.release()
-            self.capture = None
         with self._lock:
             self._latest_bgr = None
 

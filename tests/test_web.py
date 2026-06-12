@@ -90,6 +90,38 @@ def test_training_samples_collect_from_all_capture_datasets(tmp_path):
     assert data["total"] == 3
 
 
+def test_camera_mode_supports_orbbec_femto(tmp_path):
+    client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(width=640, height=360))))
+
+    response = client.post("/api/camera/mode", json={"mode": "orbbec_femto"})
+    data = response.json()
+
+    assert response.status_code == 200
+    assert data["mode"] == "orbbec_femto"
+    assert data["provider"] == "orbbec"
+    assert data["device_index"] == -1
+    assert data["depth_enabled"] is True
+
+    current = client.get("/api/camera/mode")
+    assert current.status_code == 200
+    assert current.json()["mode"] == "orbbec_femto"
+
+
+def test_camera_mode_supports_astra_hybrid(tmp_path, monkeypatch):
+    monkeypatch.setattr("robot_vision.web.app.select_camera_device_index", lambda kind, preferred_index=None: 2)
+    monkeypatch.setattr("robot_vision.web.app._ensure_astra_ros_driver", lambda data_dir: None)
+    client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(width=640, height=360))))
+
+    response = client.post("/api/camera/mode", json={"mode": "astra"})
+    data = response.json()
+
+    assert response.status_code == 200
+    assert data["mode"] == "astra"
+    assert data["provider"] == "astra_hybrid"
+    assert data["device_index"] == 2
+    assert data["depth_enabled"] is True
+
+
 def test_training_samples_collect_from_named_capture_dataset(tmp_path):
     _write_capture_samples(tmp_path)
     client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(width=640, height=360))))

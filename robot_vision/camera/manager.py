@@ -14,10 +14,10 @@ def create_camera(config: CameraConfig):
         return MockCamera(config)
     if provider == "opencv":
         return OpenCVCamera(config)
-    if provider in {"orbbec", "astra", "astra_plus_pro"}:
+    if provider == "orbbec":
         return OrbbecCamera(config)
     if provider in {"ros_astra", "astra_ros", "ros"}:
         return RosAstraCamera(config)
-    if provider in {"astra_hybrid", "hybrid_astra", "rgbd_astra"}:
+    if provider in {"astra", "astra_plus_pro", "astra_hybrid", "hybrid_astra", "rgbd_astra"}:
         return AstraHybridCamera(config)
     raise ValueError(f"Unsupported camera provider: {config.provider}")

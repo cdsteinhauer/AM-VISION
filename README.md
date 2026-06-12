@@ -105,14 +105,15 @@ Supported providers:
 - `opencv`: standard USB camera via OpenCV/V4L2.
 - `ros_astra`: RGB and depth from the existing ROS2 Astra driver topics.
 - `astra_hybrid`: RGB from `/dev/video0` via OpenCV/V4L2 and depth from `/camera/depth/image_raw`. This is the current Jetson hardware path.
-- `orbbec`, `astra`, `astra_plus_pro`: reserved for the Astra/Orbbec SDK-backed provider.
+- `orbbec`, `astra`, `astra_plus_pro`: SDK-backed Orbbec provider. The Jetson default is now the Orbbec Femto RGB + Depth mode.
 
-The SDK-backed Orbbec provider is intentionally isolated. If `pyorbbecsdk` is missing or incompatible on the Jetson, the app still runs in mock/OpenCV modes while the SDK install is resolved.
+The SDK-backed Orbbec provider is intentionally isolated. If `pyorbbecsdk` is missing or incompatible on the Jetson, the app still runs in mock/OpenCV/Astra fallback modes while the SDK install is resolved. Install the Python binding with `python3 -m pip install --user pyorbbecsdk2`.
 
 Current Jetson hardware status:
 
 - Astra RGB is active through `/dev/video0`.
-- Astra depth is active through the existing `/home/csteinhauer/astra_ws` ROS2 Astra driver on `/camera/depth/image_raw`.
+- Orbbec Femto is the default app camera path through the Orbbec SDK.
+- Astra depth remains available through the existing `/home/csteinhauer/astra_ws` ROS2 Astra driver on `/camera/depth/image_raw` when Astra mode is selected/configured.
 
 ## Inspection Workflow
 

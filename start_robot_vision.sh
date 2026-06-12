@@ -6,7 +6,7 @@ ASTRA_WS="/home/csteinhauer/astra_ws"
 HOST="0.0.0.0"
 PORT="8080"
 URL="http://127.0.0.1:${PORT}"
-LAN_URL="http://192.168.20.241:${PORT}"
+LAN_URL="http://jetson.local:${PORT}"
 LOG_DIR="${APP_DIR}/data/logs"
 LOG_FILE="${LOG_DIR}/robot_vision_web.log"
 ASTRA_LOG="${LOG_DIR}/astra_camera.log"
@@ -107,10 +107,28 @@ mkdir -p "${LOG_DIR}"
 cd "${APP_DIR}"
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-77}"
+if [ -f "/opt/ros/humble/setup.bash" ]; then
+  set +u
+  source /opt/ros/humble/setup.bash
+  if [ -f "${ASTRA_WS}/install/setup.bash" ]; then
+    source "${ASTRA_WS}/install/setup.bash"
+  fi
+  set -u
+fi
+CAMERA_PROVIDER="$(
+  python3 - <<'PY' 2>/dev/null || true
+import yaml
+with open("config/app.yaml", "r", encoding="utf-8") as handle:
+    raw = yaml.safe_load(handle) or {}
+print(str((raw.get("camera") or {}).get("provider", "")).strip().lower())
+PY
+)"
+CAMERA_PROVIDER="${CAMERA_PROVIDER:-orbbec}"
 
 echo "Robot Vision startup"
 echo "App: ${APP_DIR}"
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
+echo "Camera provider=${CAMERA_PROVIDER}"
 echo "URL: ${LAN_URL}"
 
 if pgrep -f "python3 -m robot_vision" >/dev/null 2>&1; then
@@ -119,33 +137,42 @@ if pgrep -f "python3 -m robot_vision" >/dev/null 2>&1; then
   sleep 1
 fi
 
-if ps -ef | grep -E "ros2 launch astra_camera|astra_camera_container" | grep -v grep >/dev/null 2>&1; then
-  echo "Stopping existing Astra ROS camera process..."
-  ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill
-  sleep 2
+if [[ "${CAMERA_PROVIDER}" == "astra_hybrid" || "${CAMERA_PROVIDER}" == "hybrid_astra" || "${CAMERA_PROVIDER}" == "rgbd_astra" || "${CAMERA_PROVIDER}" == "ros_astra" || "${CAMERA_PROVIDER}" == "astra_ros" || "${CAMERA_PROVIDER}" == "ros" ]]; then
+  if ps -ef | grep -E "ros2 launch astra_camera|astra_camera_container" | grep -v grep >/dev/null 2>&1; then
+    echo "Stopping existing Astra ROS camera process..."
+    ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill
+    sleep 2
+  fi
+
+  echo "Starting Astra ROS camera driver..."
+  set +u
+  source /opt/ros/humble/setup.bash
+  source "${ASTRA_WS}/install/setup.bash"
+  set -u
+  nohup ros2 launch astra_camera astra.launch.py > "${ASTRA_LOG}" 2>&1 < /dev/null &
+  astra_pid="$!"
+  echo "Started Astra ROS PID ${astra_pid}"
+
+  for attempt in {1..30}; do
+    if timeout 2 ros2 topic echo /camera/depth/image_raw --once --field header >/dev/null 2>&1; then
+      echo "Astra depth topic is ready."
+      break
+    fi
+    if [ "${attempt}" -eq 30 ]; then
+      echo "Astra depth topic did not become ready. Last Astra log lines:"
+      tail -n 80 "${ASTRA_LOG}" || true
+      exit 1
+    fi
+    sleep 0.5
+  done
+else
+  echo "Skipping Astra ROS camera driver for provider ${CAMERA_PROVIDER}."
+  if ps -ef | grep -E "ros2 launch astra_camera|astra_camera_container" | grep -v grep >/dev/null 2>&1; then
+    echo "Stopping existing Astra ROS camera process..."
+    ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill
+    sleep 1
+  fi
 fi
-
-echo "Starting Astra ROS camera driver..."
-set +u
-source /opt/ros/humble/setup.bash
-source "${ASTRA_WS}/install/setup.bash"
-set -u
-nohup ros2 launch astra_camera astra.launch.py > "${ASTRA_LOG}" 2>&1 < /dev/null &
-astra_pid="$!"
-echo "Started Astra ROS PID ${astra_pid}"
-
-for attempt in {1..30}; do
-  if timeout 2 ros2 topic echo /camera/depth/image_raw --once --field header >/dev/null 2>&1; then
-    echo "Astra depth topic is ready."
-    break
-  fi
-  if [ "${attempt}" -eq 30 ]; then
-    echo "Astra depth topic did not become ready. Last Astra log lines:"
-    tail -n 80 "${ASTRA_LOG}" || true
-    exit 1
-  fi
-  sleep 0.5
-done
 
 echo "Starting Robot Vision server..."
 nohup python3 -m robot_vision \
@@ -168,7 +195,7 @@ if not payload.get("ok"):
 PY
   then
     echo "Robot Vision is ready: ${LAN_URL}"
-    open_robot_vision_url "${URL}"
+    open_robot_vision_url "${URL}" || true
     exit 0
   fi
   sleep 0.5

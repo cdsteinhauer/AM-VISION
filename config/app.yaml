@@ -4,7 +4,7 @@ ros_domain_id: "77"
 data_dir: data
 
 camera:
-  provider: astra_hybrid
+  provider: orbbec
   width: 1280
   height: 720
   fps: 15

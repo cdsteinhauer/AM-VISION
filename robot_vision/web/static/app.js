@@ -214,7 +214,7 @@ function resetZoom() {
 }
 
 function previewIntervalMs() {
-  if (state.mode === "live") return 25;
+  if (state.mode === "live") return 100;
   if (state.mode === "capture") return state.liveCaptureCycleMs;
   return 0;
 }
@@ -243,6 +243,13 @@ function startPreviewLoop(immediate = false) {
   const delay = immediate ? 0 : previewIntervalMs();
   if (!delay && !immediate) return;
   state.previewTimer = setTimeout(runPreviewLoop, delay);
+}
+
+function stopPreviewLoop() {
+  if (state.previewTimer) {
+    clearTimeout(state.previewTimer);
+    state.previewTimer = null;
+  }
 }
 
 async function runPreviewLoop() {
@@ -277,21 +284,20 @@ async function loadCameraSettings() {
 async function loadCameraMode() {
   const data = await api("/api/camera/mode");
   $("cameraModeSelect").value = data.mode;
-  $("cameraDeviceStatus").textContent = `Camera device: /dev/video${data.device_index ?? 0}`;
-  $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
+  renderCameraModeStatus(data);
   return data;
 }
 
 async function applyCameraMode() {
   const mode = $("cameraModeSelect").value;
+  stopPreviewLoop();
   $("cameraModeStatus").textContent = "Camera mode: finding device...";
   const data = await api("/api/camera/mode", {
     method: "POST",
     body: JSON.stringify({ mode }),
   });
   $("cameraModeSelect").value = data.mode;
-  $("cameraDeviceStatus").textContent = `Camera device: /dev/video${data.device_index ?? 0}`;
-  $("cameraModeStatus").textContent = `Camera mode: ${data.mode === "global_shutter" ? "Single Global Shutter" : "Astra RGB + Depth"} (${data.provider})`;
+  renderCameraModeStatus(data);
   state.lastResultTools = [];
   state.lastSnapshot = null;
   drawOverlay([]);
@@ -300,6 +306,18 @@ async function applyCameraMode() {
   if (state.mode !== "snap") {
     startPreviewLoop(true);
   }
+}
+
+function renderCameraModeStatus(data) {
+  const isSdkCamera = data.mode === "orbbec_femto" || data.device_index === null || data.device_index < 0;
+  $("cameraDeviceStatus").textContent = isSdkCamera ? "Camera device: Orbbec SDK" : `Camera device: /dev/video${data.device_index ?? 0}`;
+  $("cameraModeStatus").textContent = `Camera mode: ${cameraModeLabel(data.mode)} (${data.provider})`;
+}
+
+function cameraModeLabel(mode) {
+  if (mode === "orbbec_femto") return "Orbbec Femto RGB + Depth";
+  if (mode === "global_shutter") return "Single Global Shutter";
+  return "Astra RGB + Depth";
 }
 
 function renderCameraSettings(controls) {

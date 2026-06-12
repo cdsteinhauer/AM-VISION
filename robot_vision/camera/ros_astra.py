@@ -23,6 +23,7 @@ class RosAstraCamera:
         self._depth_stamp = 0.0
         self._last_depth_accept = 0.0
         self._depth_min_interval = 0.2
+        self._stop_event = threading.Event()
         self._node = None
         self._spin_thread: threading.Thread | None = None
         self._rclpy = None
@@ -30,6 +31,7 @@ class RosAstraCamera:
     def start(self) -> None:
         if self.started:
             return
+        self._stop_event.clear()
         import rclpy
         from rclpy.node import Node
         from sensor_msgs.msg import Image
@@ -57,15 +59,24 @@ class RosAstraCamera:
                 parent._set_depth(_image_msg_to_depth(msg))
 
         self._node = CameraNode()
-        self._spin_thread = threading.Thread(target=rclpy.spin, args=(self._node,), daemon=True)
+        self._spin_thread = threading.Thread(target=self._spin_loop, daemon=True)
         self._spin_thread.start()
         self.started = True
 
     def stop(self) -> None:
+        self._stop_event.set()
         if self._node is not None:
             self._node.destroy_node()
             self._node = None
+        if self._spin_thread is not None:
+            self._spin_thread.join(timeout=1.0)
+            self._spin_thread = None
         self.started = False
+        with self._lock:
+            self._color = None
+            self._depth = None
+            self._color_stamp = 0.0
+            self._depth_stamp = 0.0
 
     def snapshot(self) -> Frame:
         if not self.started:
@@ -111,6 +122,15 @@ class RosAstraCamera:
         with self._lock:
             self._depth = depth
             self._depth_stamp = time.time()
+
+    def _spin_loop(self) -> None:
+        while not self._stop_event.is_set() and self._node is not None and self._rclpy is not None:
+            try:
+                self._rclpy.spin_once(self._node, timeout_sec=0.1)
+            except Exception:
+                if not self._stop_event.is_set():
+                    raise
+                break
 
 
 def _image_msg_to_rgb(msg) -> np.ndarray:

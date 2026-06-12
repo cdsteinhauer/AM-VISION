@@ -15,12 +15,12 @@ setup(
     install_requires=[
         "fastapi>=0.110",
         "uvicorn[standard]>=0.27",
-        "numpy>=1.24",
+        "numpy>=1.24,<2",
         "pillow>=10",
         "pyyaml>=6",
     ],
     extras_require={
-        "camera": ["opencv-python>=4.8"],
+        "camera": ["opencv-python>=4.8,<4.12", "pyorbbecsdk2>=2.1"],
         "train": [
             "torch>=2.1",
             "torchvision>=0.16",

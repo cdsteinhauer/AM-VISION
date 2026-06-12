@@ -74,7 +74,7 @@ class CameraSettingsPayload(BaseModel):
 
 
 class CameraModePayload(BaseModel):
-    mode: str = Field(pattern="^(astra|global_shutter)$")
+    mode: str = Field(pattern="^(orbbec_femto|astra|global_shutter)$")
     device_index: int = -1
 
 
@@ -166,9 +166,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/api/camera/mode")
     def camera_mode():
-        mode = "global_shutter" if camera_config.provider == "opencv" else "astra"
         return {
-            "mode": mode,
+            "mode": _camera_mode_from_config(camera_config),
             "provider": camera_config.provider,
             "device_index": camera_config.device_index,
             "depth_enabled": camera_config.depth_enabled,
@@ -193,7 +192,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     gain=0,
                     depth_enabled=False,
                 )
-            else:
+            elif payload.mode == "astra":
                 device_index = select_camera_device_index("astra", preferred_index)
                 next_config = replace(
                     camera_config,
@@ -207,16 +206,33 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     gain=-1,
                     depth_enabled=True,
                 )
+            else:
+                next_config = replace(
+                    camera_config,
+                    provider="orbbec",
+                    device_index=-1,
+                    width=1280,
+                    height=720,
+                    fps=15,
+                    auto_exposure=True,
+                    exposure=-1,
+                    gain=-1,
+                    depth_enabled=True,
+                )
             with camera_lock:
                 if hasattr(camera, "stop"):
                     camera.stop()
                 time.sleep(0.25)
+                if _camera_needs_astra_driver(next_config):
+                    _ensure_astra_ros_driver(cfg.data_dir)
+                else:
+                    _stop_astra_ros_driver()
                 camera_config = next_config
                 camera = create_camera(camera_config)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {
-            "mode": "global_shutter" if camera_config.provider == "opencv" else "astra",
+            "mode": _camera_mode_from_config(camera_config),
             "provider": camera_config.provider,
             "device_index": camera_config.device_index,
             "depth_enabled": camera_config.depth_enabled,
@@ -663,6 +679,82 @@ def _resolve_auto_camera_config(camera_config):
     except Exception:
         return camera_config
     return camera_config
+
+
+def _camera_mode_from_config(camera_config) -> str:
+    provider = camera_config.provider.lower().strip()
+    if provider == "opencv":
+        return "global_shutter"
+    if provider == "orbbec":
+        return "orbbec_femto"
+    return "astra"
+
+
+def _camera_needs_astra_driver(camera_config) -> bool:
+    return camera_config.provider.lower().strip() in {"astra", "astra_plus_pro", "astra_hybrid", "hybrid_astra", "rgbd_astra", "ros_astra", "astra_ros", "ros"}
+
+
+def _ensure_astra_ros_driver(data_dir: Path) -> None:
+    if os.name == "nt" or shutil.which("ros2") is None:
+        return
+    if _astra_ros_driver_running():
+        return
+    log_path = data_dir / "logs" / "astra_camera.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    astra_ws = os.environ.get("ASTRA_WS", "/home/csteinhauer/astra_ws")
+    command = (
+        "set -e; "
+        "source /opt/ros/humble/setup.bash; "
+        f"if [ -f '{astra_ws}/install/setup.bash' ]; then source '{astra_ws}/install/setup.bash'; fi; "
+        "exec ros2 launch astra_camera astra.launch.py"
+    )
+    with log_path.open("ab") as log_handle:
+        subprocess.Popen(
+            ["bash", "-lc", command],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    _wait_for_astra_depth_topic(timeout_s=5.0)
+
+
+def _stop_astra_ros_driver() -> None:
+    if os.name == "nt":
+        return
+    subprocess.run(
+        ["bash", "-lc", "ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5.0,
+        check=False,
+    )
+
+
+def _astra_ros_driver_running() -> bool:
+    result = subprocess.run(
+        ["bash", "-lc", "ps -ef | grep -E 'ros2 launch astra_camera|astra_camera_container' | grep -v grep"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2.0,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _wait_for_astra_depth_topic(timeout_s: float) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        result = subprocess.run(
+            ["bash", "-lc", "source /opt/ros/humble/setup.bash && timeout 1 ros2 topic echo /camera/depth/image_raw --once --field header >/dev/null 2>&1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        time.sleep(0.25)
 
 
 def _training_subprocess_code() -> str:

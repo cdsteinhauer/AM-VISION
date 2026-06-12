@@ -283,6 +283,42 @@ def test_rectangle_tool_uses_depth_detection_when_rgb_has_no_outline():
     assert result.bbox_px == (70, 52, 119, 77)
 
 
+def test_depth_rectangle_detection_uses_local_depth_when_reference_is_missing():
+    image_shape = (120, 160)
+    depth = np.full(image_shape, 900.0, dtype=np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(pixels_per_mm_x=1.0, pixels_per_mm_y=1.0)
+
+    detection = detect_depth_rectangle_in_roi(depth, (0.35, 0.35, 0.5, 0.4), image_shape, calibration)
+
+    assert detection is not None
+    assert detection.bbox_px == (70, 52, 119, 77)
+    assert detection.width_px == 50.0
+    assert detection.height_px == 26.0
+
+
+def test_rectangle_tool_prefers_local_depth_when_rgb_spans_search_area():
+    image = np.full((120, 160, 3), 80, dtype=np.uint8)
+    image[62:76, 56:136] = 205
+    depth = np.full((120, 160), 900.0, dtype=np.float32)
+    depth[52:78, 70:120] -= 45.0
+    calibration = CalibrationProfile(pixels_per_mm_x=1.0, pixels_per_mm_y=1.0)
+    tool = InspectionTool.from_dict({
+        "id": "depth_rect",
+        "name": "Depth rectangle",
+        "type": "rectangle",
+        "roi": [0.35, 0.35, 0.5, 0.4],
+    })
+
+    result = InspectionEngine()._inspect_rectangle(image, tool, calibration, depth)
+
+    assert result.passed is True
+    assert result.measurements["detection_method"] == "depth_local"
+    assert result.measurements["depth_method"] == "local_background_ring"
+    assert result.measurements["depth_height_mm"] == 45.0
+    assert result.bbox_px == (70, 52, 119, 77)
+
+
 def test_depth_detection_offset_moves_overlay_without_moving_height_sample():
     image = np.full((120, 160, 3), 80, dtype=np.uint8)
     yy, xx = np.mgrid[0:120, 0:160]
