@@ -140,8 +140,9 @@ class FakeProfiles:
 
 
 class FakePipeline:
-    def __init__(self):
+    def __init__(self, device=None):
         self.stopped = False
+        self.device = device
 
     def get_stream_profile_list(self, sensor):
         return FakeProfiles()

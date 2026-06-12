@@ -107,6 +107,24 @@ def test_camera_mode_supports_orbbec_femto(tmp_path):
     assert current.json()["mode"] == "orbbec_femto"
 
 
+def test_camera_mode_reapply_current_mode_does_not_restart_camera(tmp_path, monkeypatch):
+    class FakeCamera:
+        stop_calls = 0
+
+        def stop(self):
+            self.stop_calls += 1
+
+    fake_camera = FakeCamera()
+    monkeypatch.setattr("robot_vision.web.app.create_camera", lambda config: fake_camera)
+    client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(provider="orbbec", device_index=-1))))
+
+    response = client.post("/api/camera/mode", json={"mode": "orbbec_femto"})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "orbbec_femto"
+    assert fake_camera.stop_calls == 0
+
+
 def test_camera_mode_supports_astra_hybrid(tmp_path, monkeypatch):
     monkeypatch.setattr("robot_vision.web.app.select_camera_device_index", lambda kind, preferred_index=None: 2)
     monkeypatch.setattr("robot_vision.web.app._ensure_astra_ros_driver", lambda data_dir: None)
@@ -120,6 +138,30 @@ def test_camera_mode_supports_astra_hybrid(tmp_path, monkeypatch):
     assert data["provider"] == "astra_hybrid"
     assert data["device_index"] == 2
     assert data["depth_enabled"] is True
+
+
+def test_camera_mode_switch_from_astra_to_orbbec_schedules_restart(tmp_path, monkeypatch):
+    class FakeCamera:
+        stop_calls = 0
+
+        def stop(self):
+            self.stop_calls += 1
+
+    fake_camera = FakeCamera()
+    restart_calls = []
+    persist_calls = []
+    monkeypatch.setattr("robot_vision.web.app.create_camera", lambda config: fake_camera)
+    monkeypatch.setattr("robot_vision.web.app._restart_process_soon", lambda: restart_calls.append(True))
+    monkeypatch.setattr("robot_vision.web.app._persist_runtime_camera_config", lambda config: persist_calls.append(config.provider))
+    client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(provider="astra_hybrid", device_index=0))))
+
+    response = client.post("/api/camera/mode", json={"mode": "orbbec_femto"})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "orbbec_femto"
+    assert fake_camera.stop_calls == 1
+    assert persist_calls == ["orbbec"]
+    assert restart_calls == [True]
 
 
 def test_training_samples_collect_from_named_capture_dataset(tmp_path):

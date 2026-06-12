@@ -84,7 +84,8 @@ class OrbbecCamera:
                         timestamp=self._latest_timestamp,
                     )
                 if self._last_error and self._thread is not None and not self._thread.is_alive():
-                    raise RuntimeError(self._last_error)
+                    self._thread = None
+                    self.start()
                 self._frame_ready.wait(timeout=0.1)
             raise RuntimeError(self._last_error or "Timed out waiting for Orbbec Femto frame")
 
@@ -120,83 +121,96 @@ class OrbbecCamera:
         return settings
 
     def _reader_loop(self) -> None:
-        pipeline = None
-        try:
-            sdk = _load_sdk()
-            self._device_info = _first_device_info(sdk)
-
-            pipeline = sdk.Pipeline()
-            config = sdk.Config()
-
-            color_profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
-            color_profile = color_profiles.get_default_video_stream_profile()
-            config.enable_stream(color_profile)
-
-            depth_profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR)
-            depth_profile = depth_profiles.get_default_video_stream_profile()
-            config.enable_stream(depth_profile)
-            config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
-
-            align_filter = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM)
+        attempts = 0
+        max_attempts = 5
+        sdk = _load_sdk()
+        device, device_info = _select_device(sdk)
+        self._device_info = device_info
+        while not self._stop_event.is_set() and attempts < max_attempts:
+            pipeline = None
             try:
-                pipeline.enable_frame_sync()
-            except Exception:
-                pass
+                pipeline = sdk.Pipeline(device) if device is not None else sdk.Pipeline()
+                config = sdk.Config()
 
-            pipeline.start(config)
-            with self._lock:
-                self.pipeline = pipeline
-                self._last_error = None
-                self._frame_ready.notify_all()
+                color_profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
+                color_profile = color_profiles.get_default_video_stream_profile()
+                config.enable_stream(color_profile)
 
-            last_fps_time = time.time()
-            frames_since_fps = 0
-            while not self._stop_event.is_set():
-                frames = pipeline.wait_for_frames(1000)
-                if not frames:
-                    continue
-                aligned = align_filter.process(frames)
-                if aligned:
-                    frames = aligned
-                color_frame = frames.get_color_frame()
-                depth_frame = frames.get_depth_frame()
-                if not color_frame or not depth_frame:
-                    continue
+                depth_profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR)
+                depth_profile = depth_profiles.get_default_video_stream_profile()
+                config.enable_stream(depth_profile)
+                config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
 
-                rgb = _color_frame_to_rgb(color_frame, sdk.OBFormat)
-                if rgb is None:
-                    continue
-                depth = _depth_frame_to_mm(depth_frame)
-                if depth.shape[:2] != rgb.shape[:2]:
-                    depth = _resize_depth_to_rgb(depth, rgb.shape[1], rgb.shape[0])
-
-                now = time.time()
-                frames_since_fps += 1
-                elapsed = now - last_fps_time
-                with self._lock:
-                    self._latest_rgb = rgb
-                    self._latest_depth = depth
-                    self._latest_timestamp = now
-                    self._frame_count += 1
-                    if elapsed >= 1.0:
-                        self._fps = frames_since_fps / elapsed
-                        frames_since_fps = 0
-                        last_fps_time = now
-                    self._frame_ready.notify_all()
-        except Exception as exc:
-            with self._lock:
-                self._last_error = str(exc)
-                self._frame_ready.notify_all()
-        finally:
-            if pipeline is not None:
+                align_filter = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM)
                 try:
-                    pipeline.stop()
+                    pipeline.enable_frame_sync()
                 except Exception:
                     pass
-            with self._lock:
-                if self.pipeline is pipeline:
-                    self.pipeline = None
-                self._frame_ready.notify_all()
+
+                pipeline.start(config)
+                attempts = 0
+                with self._lock:
+                    self.pipeline = pipeline
+                    self._last_error = None
+                    self._frame_ready.notify_all()
+
+                last_fps_time = time.time()
+                frames_since_fps = 0
+                while not self._stop_event.is_set():
+                    frames = pipeline.wait_for_frames(1000)
+                    if not frames:
+                        continue
+                    aligned = align_filter.process(frames)
+                    if aligned:
+                        frames = aligned
+                    color_frame = frames.get_color_frame()
+                    depth_frame = frames.get_depth_frame()
+                    if not color_frame or not depth_frame:
+                        continue
+
+                    rgb = _color_frame_to_rgb(color_frame, sdk.OBFormat)
+                    if rgb is None:
+                        continue
+                    depth = _depth_frame_to_mm(depth_frame)
+                    if depth.shape[:2] != rgb.shape[:2]:
+                        depth = _resize_depth_to_rgb(depth, rgb.shape[1], rgb.shape[0])
+
+                    now = time.time()
+                    frames_since_fps += 1
+                    elapsed = now - last_fps_time
+                    with self._lock:
+                        self._latest_rgb = rgb
+                        self._latest_depth = depth
+                        self._latest_timestamp = now
+                        self._frame_count += 1
+                        if elapsed >= 1.0:
+                            self._fps = frames_since_fps / elapsed
+                            frames_since_fps = 0
+                            last_fps_time = now
+                        self._frame_ready.notify_all()
+            except Exception as exc:
+                attempts += 1
+                retrying = attempts < max_attempts and not self._stop_event.is_set()
+                detail = f"{exc}; retrying Orbbec pipeline ({attempts}/{max_attempts})" if retrying else str(exc)
+                with self._lock:
+                    self._last_error = detail
+                    self._frame_ready.notify_all()
+                if retrying:
+                    time.sleep(min(2.0, 0.4 * attempts))
+            finally:
+                if pipeline is not None:
+                    try:
+                        pipeline.stop()
+                    except Exception:
+                        pass
+                with self._lock:
+                    if self.pipeline is pipeline:
+                        self.pipeline = None
+                    self._frame_ready.notify_all()
+        with self._lock:
+            if self._thread is threading.current_thread():
+                self._thread = None
+            self._frame_ready.notify_all()
 
 
 def _load_sdk():
@@ -207,16 +221,37 @@ def _load_sdk():
     return pyorbbecsdk
 
 
-def _first_device_info(sdk) -> dict[str, Any] | None:
+def _select_device(sdk) -> tuple[Any | None, dict[str, Any] | None]:
     try:
         context = sdk.Context()
         device_list = context.query_devices()
         if device_list.get_count() <= 0:
-            return None
-        device = device_list[0]
-        info = device.get_device_info()
+            return None, None
     except Exception as exc:
-        return {"error": str(exc)}
+        return None, {"error": str(exc)}
+
+    fallback: tuple[Any, dict[str, Any]] | None = None
+    for index in range(device_list.get_count()):
+        try:
+            device = device_list[index]
+            info = device.get_device_info()
+            device_info = _device_info_to_dict(info)
+        except Exception as exc:
+            if fallback is None:
+                fallback = (None, {"error": str(exc)})  # type: ignore[assignment]
+            continue
+        name = str(device_info.get("name") or "").lower()
+        serial = str(device_info.get("serial") or "").lower()
+        if "femto" in name or "femto" in serial:
+            return device, device_info
+        if fallback is None:
+            fallback = (device, device_info)
+    if fallback is not None:
+        return fallback
+    return None, None
+
+
+def _device_info_to_dict(info: Any) -> dict[str, Any] | None:
     if info is None:
         return None
     return {

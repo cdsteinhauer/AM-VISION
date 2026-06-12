@@ -137,7 +137,7 @@ if pgrep -f "python3 -m robot_vision" >/dev/null 2>&1; then
   sleep 1
 fi
 
-if [[ "${CAMERA_PROVIDER}" == "astra_hybrid" || "${CAMERA_PROVIDER}" == "hybrid_astra" || "${CAMERA_PROVIDER}" == "rgbd_astra" || "${CAMERA_PROVIDER}" == "ros_astra" || "${CAMERA_PROVIDER}" == "astra_ros" || "${CAMERA_PROVIDER}" == "ros" ]]; then
+if [[ "${CAMERA_PROVIDER}" == "ros_astra" || "${CAMERA_PROVIDER}" == "astra_ros" || "${CAMERA_PROVIDER}" == "ros" ]]; then
   if ps -ef | grep -E "ros2 launch astra_camera|astra_camera_container" | grep -v grep >/dev/null 2>&1; then
     echo "Stopping existing Astra ROS camera process..."
     ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill
@@ -166,7 +166,7 @@ if [[ "${CAMERA_PROVIDER}" == "astra_hybrid" || "${CAMERA_PROVIDER}" == "hybrid_
     sleep 0.5
   done
 else
-  echo "Skipping Astra ROS camera driver for provider ${CAMERA_PROVIDER}."
+  echo "Skipping pre-start Astra ROS camera driver for provider ${CAMERA_PROVIDER}."
   if ps -ef | grep -E "ros2 launch astra_camera|astra_camera_container" | grep -v grep >/dev/null 2>&1; then
     echo "Stopping existing Astra ROS camera process..."
     ps -ef | awk '/ros2 launch astra_camera|astra_camera_container/ && !/awk/ {print $2}' | xargs -r kill

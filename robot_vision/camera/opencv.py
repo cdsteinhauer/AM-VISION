@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -114,6 +115,9 @@ class OpenCVCamera:
             capture.release()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                self._close_device_fds()
+                self._thread.join(timeout=1.0)
             self._thread = None
         with self._lock:
             self._latest_bgr = None
@@ -234,6 +238,21 @@ class OpenCVCamera:
 
     def _device_path(self) -> str:
         return f"/dev/video{self.config.device_index}"
+
+    def _close_device_fds(self) -> None:
+        if os.name == "nt":
+            return
+        device_path = self._device_path()
+        fd_dir = Path("/proc/self/fd")
+        if not fd_dir.exists():
+            return
+        for fd_path in fd_dir.iterdir():
+            try:
+                if fd_path.resolve() != Path(device_path):
+                    continue
+                os.close(int(fd_path.name))
+            except Exception:
+                continue
 
     def _open_capture(self):
         import cv2

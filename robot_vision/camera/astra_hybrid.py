@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import threading
 import time
 from typing import Any
@@ -37,6 +40,7 @@ class AstraHybridCamera:
             return
         self._stop_event.clear()
         self.rgb_camera.start()
+        _ensure_astra_ros_driver()
 
         import rclpy
         from rclpy.node import Node
@@ -140,3 +144,54 @@ class AstraHybridCamera:
         with self._lock:
             self._depth = depth
             self._depth_stamp = time.time()
+
+
+def _ensure_astra_ros_driver() -> None:
+    if os.name == "nt" or shutil.which("ros2") is None:
+        return
+    if _astra_ros_driver_running():
+        return
+    astra_ws = os.environ.get("ASTRA_WS", "/home/csteinhauer/astra_ws")
+    command = (
+        "set -e; "
+        "source /opt/ros/humble/setup.bash; "
+        f"if [ -f '{astra_ws}/install/setup.bash' ]; then source '{astra_ws}/install/setup.bash'; fi; "
+        "exec ros2 launch astra_camera astra.launch.py"
+    )
+    log_path = "/home/csteinhauer/robot_vision/data/logs/astra_camera.log"
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "ab") as log_handle:
+        subprocess.Popen(
+            ["bash", "-lc", command],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    _wait_for_astra_depth_topic(timeout_s=5.0)
+
+
+def _astra_ros_driver_running() -> bool:
+    result = subprocess.run(
+        ["bash", "-lc", "ps -ef | grep -E 'ros2 launch astra_camera|astra_camera_container' | grep -v grep"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2.0,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _wait_for_astra_depth_topic(timeout_s: float) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        result = subprocess.run(
+            ["bash", "-lc", "source /opt/ros/humble/setup.bash && timeout 1 ros2 topic echo /camera/depth/image_raw --once --field header >/dev/null 2>&1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        time.sleep(0.25)

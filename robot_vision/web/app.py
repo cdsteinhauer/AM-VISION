@@ -6,6 +6,7 @@ import subprocess
 import sys
 import shutil
 import time
+import yaml
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 from robot_vision.camera import create_camera
 from robot_vision.camera.base import depth_to_display, encode_jpeg_base64, encode_png_base64
 from robot_vision.camera.opencv import list_video_devices, select_camera_device_index
-from robot_vision.config import AppConfig, load_config
+from robot_vision.config import AppConfig, PROJECT_ROOT, load_config
 from robot_vision.inspection.calibration import CalibrationProfile, DepthReference
 from robot_vision.inspection.engine import InspectionEngine, debug_candidate_lines_in_roi, detect_rectangle_in_roi
 from robot_vision.inspection.models import InspectionRecipe, InspectionTool
@@ -178,6 +179,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         nonlocal camera, camera_config
         try:
             preferred_index = payload.device_index if payload.device_index >= 0 else None
+            if camera_config.provider.lower().strip() != "mock" and payload.mode == _camera_mode_from_config(camera_config) and (
+                preferred_index is None or preferred_index == camera_config.device_index
+            ):
+                return {
+                    "mode": _camera_mode_from_config(camera_config),
+                    "provider": camera_config.provider,
+                    "device_index": camera_config.device_index,
+                    "depth_enabled": camera_config.depth_enabled,
+                }
             if payload.mode == "global_shutter":
                 device_index = select_camera_device_index("global_shutter", preferred_index)
                 next_config = replace(
@@ -219,16 +229,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     gain=-1,
                     depth_enabled=True,
                 )
+            restart_required = _hardware_restart_required(camera_config, next_config)
             with camera_lock:
                 if hasattr(camera, "stop"):
                     camera.stop()
                 time.sleep(0.25)
+                if restart_required:
+                    _persist_runtime_camera_config(next_config)
+                    if not _camera_needs_astra_driver(next_config):
+                        _stop_astra_ros_driver()
+                    camera_config = next_config
+                    _restart_process_soon()
+                    return {
+                        "mode": _camera_mode_from_config(camera_config),
+                        "provider": camera_config.provider,
+                        "device_index": camera_config.device_index,
+                        "depth_enabled": camera_config.depth_enabled,
+                    }
                 if _camera_needs_astra_driver(next_config):
                     _ensure_astra_ros_driver(cfg.data_dir)
                 else:
                     _stop_astra_ros_driver()
                 camera_config = next_config
-                camera = create_camera(camera_config)
+                if restart_required:
+                    _restart_process_soon()
+                else:
+                    camera = create_camera(camera_config)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {
@@ -694,6 +720,46 @@ def _camera_needs_astra_driver(camera_config) -> bool:
     return camera_config.provider.lower().strip() in {"astra", "astra_plus_pro", "astra_hybrid", "hybrid_astra", "rgbd_astra", "ros_astra", "astra_ros", "ros"}
 
 
+def _hardware_restart_required(current_config, next_config) -> bool:
+    current_provider = current_config.provider.lower().strip()
+    next_provider = next_config.provider.lower().strip()
+    if current_provider == "mock" or next_provider == "mock":
+        return False
+    return current_provider != next_provider
+
+
+def _persist_runtime_camera_config(camera_config) -> None:
+    path = _runtime_config_path()
+    raw: dict[str, Any] = {}
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            raw = loaded
+    raw["camera"] = {
+        "provider": camera_config.provider,
+        "width": camera_config.width,
+        "height": camera_config.height,
+        "fps": camera_config.fps,
+        "device_index": camera_config.device_index,
+        "auto_exposure": camera_config.auto_exposure,
+        "exposure": camera_config.exposure,
+        "gain": camera_config.gain,
+        "depth_enabled": camera_config.depth_enabled,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+
+def _runtime_config_path() -> Path:
+    args = sys.argv[1:]
+    if "--config" in args:
+        index = args.index("--config")
+        if index + 1 < len(args):
+            path = Path(args[index + 1])
+            return path if path.is_absolute() else (Path.cwd() / path).resolve()
+    return PROJECT_ROOT / "config" / "app.yaml"
+
+
 def _ensure_astra_ros_driver(data_dir: Path) -> None:
     if os.name == "nt" or shutil.which("ros2") is None:
         return
@@ -755,6 +821,14 @@ def _wait_for_astra_depth_topic(timeout_s: float) -> None:
         if result.returncode == 0:
             return
         time.sleep(0.25)
+
+
+def _restart_process_soon(delay_s: float = 1.0) -> None:
+    def restart() -> None:
+        time.sleep(delay_s)
+        os.execv(sys.executable, [sys.executable, "-m", "robot_vision", *sys.argv[1:]])
+
+    Thread(target=restart, daemon=True).start()
 
 
 def _training_subprocess_code() -> str:
