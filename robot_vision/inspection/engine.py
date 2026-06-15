@@ -43,6 +43,7 @@ class CircleDetection:
     search_area_px: tuple[int, int, int, int]
     fill_ratio: float = 0.0
     circle_score: float = 0.0
+    depth_bbox_px: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,9 +164,20 @@ class InspectionEngine:
     ) -> ToolResult:
         messages: list[str] = []
         detection = detect_circle_in_roi(image, tool.roi, tool.min_edge_score)
+        detection_method = "rgb"
+        if detection is None:
+            detection = detect_depth_circle_in_roi(depth, tool.roi, image.shape[:2], calibration, tool.min_edge_score)
+            detection_method = "depth_reference" if calibration.depth_reference is not None else "depth_local"
         if detection is None:
             x, y, w, h = _roi_pixels(tool.roi, image.shape[1], image.shape[0])
-            return ToolResult(tool.id, tool.name, False, {}, (x, y, x + w, y + h), ["No circular part found in detection area"])
+            return ToolResult(
+                tool.id,
+                tool.name,
+                False,
+                {},
+                (x, y, x + w, y + h),
+                ["No circular part found in detection area"],
+            )
 
         diameter_px = detection.radius_px * 2.0
         pixels_per_mm = (calibration.pixels_per_mm_x + calibration.pixels_per_mm_y) / 2.0
@@ -181,7 +193,7 @@ class InspectionEngine:
             tool.name,
             passed,
             {
-                "detection_method": "rgb",
+                "detection_method": detection_method,
                 "center_x_px": round(float(detection.center_px[0]), 3),
                 "center_y_px": round(float(detection.center_px[1]), 3),
                 "radius_px": round(float(detection.radius_px), 3),
@@ -202,10 +214,11 @@ class InspectionEngine:
                     detection.search_area_px,
                     image.shape[:2],
                     calibration,
+                    depth_bbox_px=detection.depth_bbox_px,
                 ),
             },
             detection.bbox_px,
-            ["RGB circle detected", *messages],
+            [_detection_method_message(detection_method, "circle"), *messages],
         )
 
     def _inspect_ai_classifier(self, image: np.ndarray, tool: InspectionTool) -> ToolResult:
@@ -1740,6 +1753,8 @@ def detect_circle_in_roi(
             best_score = candidate.circle_score
             best = candidate
     if best is None:
+        best = _hough_circle_detection(gray)
+    if best is None:
         return None
     cx, cy = best.center_px
     bx0, by0, bx1, by1 = best.bbox_px
@@ -1750,6 +1765,143 @@ def detect_circle_in_roi(
         search_area_px=(x, y, w, h),
         fill_ratio=best.fill_ratio,
         circle_score=best.circle_score,
+    )
+
+
+def _hough_circle_detection(gray: np.ndarray) -> CircleDetection | None:
+    if gray.size == 0 or min(gray.shape[:2]) < 16:
+        return None
+    try:
+        import cv2
+    except Exception:
+        return None
+    height, width = gray.shape[:2]
+    min_radius = max(4, int(min(width, height) * 0.08))
+    max_radius = max(min_radius + 1, int(min(width, height) * 0.48))
+    blurred = cv2.medianBlur(gray.astype(np.uint8), 5)
+    candidates: list[tuple[float, float, float]] = []
+    for vote_threshold in (34, 28, 22, 16):
+        circles = cv2.HoughCircles(
+            blurred,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=max(8, min(width, height) // 3),
+            param1=80,
+            param2=vote_threshold,
+            minRadius=min_radius,
+            maxRadius=max_radius,
+        )
+        if circles is not None:
+            candidates = [(float(cx), float(cy), float(radius)) for cx, cy, radius in circles[0]]
+            break
+    if not candidates:
+        return None
+
+    roi_center = np.array([width / 2.0, height / 2.0], dtype=np.float32)
+    roi_diag = max(1.0, float((width * width + height * height) ** 0.5))
+    best: tuple[float, float, float] | None = None
+    best_score = 0.0
+    for center_x, center_y, radius in candidates:
+        if radius < min_radius or radius > max_radius:
+            continue
+        if center_x - radius < -width * 0.08 or center_x + radius > width * 1.08:
+            continue
+        if center_y - radius < -height * 0.08 or center_y + radius > height * 1.08:
+            continue
+        center = np.array([center_x, center_y], dtype=np.float32)
+        center_factor = 1.0 - min(0.75, float(np.linalg.norm(center - roi_center)) / roi_diag)
+        radius_factor = radius / max(1.0, min(width, height))
+        score = float(radius * center_factor * (1.0 + radius_factor))
+        if score > best_score:
+            best_score = score
+            best = (center_x, center_y, radius)
+    if best is None:
+        return None
+    center_x, center_y, radius = best
+    x0 = max(0, min(width - 1, int(round(center_x - radius))))
+    y0 = max(0, min(height - 1, int(round(center_y - radius))))
+    x1 = max(x0, min(width - 1, int(round(center_x + radius))))
+    y1 = max(y0, min(height - 1, int(round(center_y + radius))))
+    return CircleDetection(
+        center_px=(center_x, center_y),
+        radius_px=radius,
+        bbox_px=(x0, y0, x1, y1),
+        search_area_px=(0, 0, width, height),
+        fill_ratio=0.0,
+        circle_score=best_score,
+    )
+
+
+def detect_depth_circle_in_roi(
+    depth: np.ndarray | None,
+    roi: tuple[float, float, float, float],
+    image_shape: tuple[int, int],
+    calibration: CalibrationProfile,
+    min_score: float = 20.0,
+) -> CircleDetection | None:
+    """Find a raised circular object from the depth height map inside a normalized search area."""
+    if depth is None or depth.ndim != 2:
+        return None
+    image_height, image_width = image_shape
+    image_search = _roi_pixels(roi, image_width, image_height)
+    depth_search = _scale_search_to_depth(image_search, image_width, image_height, depth.shape[1], depth.shape[0])
+    x0, y0, _x1, _y1 = depth_search
+    if calibration.depth_reference is None:
+        height_map, valid = _local_height_map(depth, depth_search)
+    else:
+        height_map, valid = _reference_height_map(depth, calibration, depth_search)
+    threshold = _depth_detection_threshold_mm(calibration)
+    mask = valid & (height_map >= threshold)
+    if not np.any(mask):
+        return None
+    circle = _best_circle_component(_clean_mask(mask), max(12, int(min_score)))
+    if circle is None:
+        return None
+    return _depth_circle_to_image_circle(
+        circle,
+        depth_origin=(x0, y0),
+        depth_shape=depth.shape,
+        image_shape=image_shape,
+        image_search=image_search,
+        calibration=calibration,
+    )
+
+
+def _depth_circle_to_image_circle(
+    circle: CircleDetection,
+    depth_origin: tuple[int, int],
+    depth_shape: tuple[int, int],
+    image_shape: tuple[int, int],
+    image_search: tuple[int, int, int, int],
+    calibration: CalibrationProfile,
+) -> CircleDetection:
+    depth_x, depth_y = depth_origin
+    depth_height, depth_width = depth_shape
+    image_height, image_width = image_shape
+    sx = image_width / max(1, depth_width)
+    sy = image_height / max(1, depth_height)
+    scale = (sx + sy) / 2.0
+    offset_x = calibration.depth_rgb_offset_x_px
+    offset_y = calibration.depth_rgb_offset_y_px
+    center_depth_x = circle.center_px[0] + depth_x
+    center_depth_y = circle.center_px[1] + depth_y
+    center_x = max(0.0, min(float(image_width - 1), center_depth_x * sx + offset_x))
+    center_y = max(0.0, min(float(image_height - 1), center_depth_y * sy + offset_y))
+    radius = float(circle.radius_px * scale)
+    x0 = max(0, min(image_width - 1, int(round(center_x - radius))))
+    y0 = max(0, min(image_height - 1, int(round(center_y - radius))))
+    x1 = max(x0, min(image_width - 1, int(round(center_x + radius))))
+    y1 = max(y0, min(image_height - 1, int(round(center_y + radius))))
+    bx0, by0, bx1, by1 = circle.bbox_px
+    depth_bbox = (bx0 + depth_x, by0 + depth_y, bx1 + depth_x, by1 + depth_y)
+    return CircleDetection(
+        center_px=(center_x, center_y),
+        radius_px=radius,
+        bbox_px=(x0, y0, x1, y1),
+        search_area_px=image_search,
+        fill_ratio=circle.fill_ratio,
+        circle_score=circle.circle_score,
+        depth_bbox_px=depth_bbox,
     )
 
 
@@ -1994,6 +2146,11 @@ def _roi_pixels(roi: tuple[float, float, float, float], width: int, height: int)
 def _detection_messages(messages: list[str], detection_method: str) -> list[str]:
     prefix = "Depth part detected" if detection_method.startswith("depth_") else "RGB outline detected"
     return [prefix, *messages]
+
+
+def _detection_method_message(detection_method: str, feature: str) -> str:
+    source = "Depth" if detection_method.startswith("depth_") else "RGB"
+    return f"{source} {feature} detected"
 
 
 def _check_range(

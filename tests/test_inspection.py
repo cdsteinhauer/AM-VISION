@@ -9,6 +9,7 @@ from robot_vision.inspection.engine import (
     InspectionEngine,
     debug_candidate_lines,
     detect_circle_in_roi,
+    detect_depth_circle_in_roi,
     detect_depth_rectangle_in_roi,
     detect_parallel_line_pair,
     detect_part_outline_in_roi,
@@ -192,6 +193,45 @@ def test_circle_tool_reports_diameter_measurement():
     assert result.measurements["diameter_mm"] <= 25
     assert result.measurements["min_diameter_mm"] == 20.0
     assert result.measurements["max_diameter_mm"] == 30.0
+
+
+def test_depth_circle_detection_finds_raised_round_part_when_rgb_is_flat():
+    yy, xx = np.mgrid[0:140, 0:180]
+    depth = np.full((140, 180), 1000.0, dtype=np.float32)
+    depth[((xx - 92) ** 2 + (yy - 72) ** 2) <= 24 ** 2] = 960.0
+    calibration = CalibrationProfile(pixels_per_mm_x=2.0, pixels_per_mm_y=2.0)
+
+    detection = detect_depth_circle_in_roi(depth, (0.25, 0.2, 0.55, 0.65), (140, 180), calibration)
+
+    assert detection is not None
+    assert 90 <= detection.center_px[0] <= 94
+    assert 70 <= detection.center_px[1] <= 74
+    assert 23 <= detection.radius_px <= 25
+    assert detection.depth_bbox_px is not None
+
+
+def test_circle_tool_falls_back_to_depth_when_rgb_has_no_candidate():
+    image = np.full((140, 180, 3), 45, dtype=np.uint8)
+    yy, xx = np.mgrid[0:140, 0:180]
+    depth = np.full((140, 180), 1000.0, dtype=np.float32)
+    depth[((xx - 92) ** 2 + (yy - 72) ** 2) <= 24 ** 2] = 960.0
+    calibration = CalibrationProfile(pixels_per_mm_x=2.0, pixels_per_mm_y=2.0)
+    tool = InspectionTool.from_dict({
+        "id": "circle",
+        "name": "Circle check",
+        "type": "circle",
+        "roi": [0.25, 0.2, 0.55, 0.65],
+        "min_diameter_mm": 20,
+        "max_diameter_mm": 30,
+    })
+
+    result = InspectionEngine()._inspect_circle(image, tool, calibration, depth)
+
+    assert result.passed is True
+    assert result.measurements["detection_method"] == "depth_local"
+    assert result.measurements["diameter_mm"] >= 23
+    assert result.measurements["diameter_mm"] <= 25
+    assert result.measurements["depth_height_mm"] >= 35
 
 
 def test_parallel_line_pair_detection_reports_average_length():
