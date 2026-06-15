@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-ToolType = Literal["rectangle", "edge", "edge_1", "edge_2", "ai_classifier"]
+ToolType = Literal["rectangle", "circle", "edge", "edge_1", "edge_2", "ai_classifier"]
 
 
 @dataclass
@@ -18,6 +18,8 @@ class InspectionTool:
     max_width_mm: float | None = None
     min_height_mm: float | None = None
     max_height_mm: float | None = None
+    min_diameter_mm: float | None = None
+    max_diameter_mm: float | None = None
     min_edge_score: float = 25.0
     min_length_mm: float | None = None
     max_length_mm: float | None = None
@@ -42,6 +44,8 @@ class InspectionTool:
             max_width_mm=_optional_float(data.get("max_width_mm")),
             min_height_mm=_optional_float(data.get("min_height_mm")),
             max_height_mm=_optional_float(data.get("max_height_mm")),
+            min_diameter_mm=_optional_float(data.get("min_diameter_mm")),
+            max_diameter_mm=_optional_float(data.get("max_diameter_mm")),
             min_edge_score=float(data.get("min_edge_score", 25.0)),
             min_length_mm=_optional_float(data.get("min_length_mm")),
             max_length_mm=_optional_float(data.get("max_length_mm")),
@@ -65,6 +69,8 @@ class InspectionTool:
             "max_width_mm": self.max_width_mm,
             "min_height_mm": self.min_height_mm,
             "max_height_mm": self.max_height_mm,
+            "min_diameter_mm": self.min_diameter_mm,
+            "max_diameter_mm": self.max_diameter_mm,
             "min_edge_score": self.min_edge_score,
             "min_length_mm": self.min_length_mm,
             "max_length_mm": self.max_length_mm,
@@ -134,6 +140,6 @@ def _normalize_tool_type(value: Any) -> ToolType:
     raw = str(value or "rectangle")
     if raw == "edge":
         return "edge_2"
-    if raw in {"rectangle", "edge_1", "edge_2", "ai_classifier"}:
+    if raw in {"rectangle", "circle", "edge_1", "edge_2", "ai_classifier"}:
         return raw
     return "rectangle"

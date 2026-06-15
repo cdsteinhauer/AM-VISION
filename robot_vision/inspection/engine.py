@@ -36,6 +36,16 @@ class RectangleDetection:
 
 
 @dataclass(frozen=True)
+class CircleDetection:
+    center_px: tuple[float, float]
+    radius_px: float
+    bbox_px: tuple[int, int, int, int]
+    search_area_px: tuple[int, int, int, int]
+    fill_ratio: float = 0.0
+    circle_score: float = 0.0
+
+
+@dataclass(frozen=True)
 class PartOutlineDetection:
     bbox_px: tuple[int, int, int, int]
     corners_px: tuple[tuple[int, int], ...]
@@ -67,6 +77,8 @@ class InspectionEngine:
                 result = self._inspect_ai_classifier(image, tool)
             elif tool.type in {"edge", "edge_1", "edge_2"}:
                 result = self._inspect_edge(image, tool, calibration, depth)
+            elif tool.type == "circle":
+                result = self._inspect_circle(image, tool, calibration, depth)
             else:
                 result = self._inspect_rectangle(image, tool, calibration, depth)
             results.append(result)
@@ -140,6 +152,60 @@ class InspectionEngine:
             },
             detection.bbox_px,
             _detection_messages(messages, detection_method),
+        )
+
+    def _inspect_circle(
+        self,
+        image: np.ndarray,
+        tool: InspectionTool,
+        calibration: CalibrationProfile,
+        depth: np.ndarray | None = None,
+    ) -> ToolResult:
+        messages: list[str] = []
+        detection = detect_circle_in_roi(image, tool.roi, tool.min_edge_score)
+        if detection is None:
+            x, y, w, h = _roi_pixels(tool.roi, image.shape[1], image.shape[0])
+            return ToolResult(tool.id, tool.name, False, {}, (x, y, x + w, y + h), ["No circular part found in detection area"])
+
+        diameter_px = detection.radius_px * 2.0
+        pixels_per_mm = (calibration.pixels_per_mm_x + calibration.pixels_per_mm_y) / 2.0
+        diameter_mm = diameter_px / pixels_per_mm
+        radius_mm = diameter_mm / 2.0
+
+        passed = True
+        passed &= _check_range("diameter", diameter_mm, tool.min_diameter_mm, tool.max_diameter_mm, messages)
+        if not messages:
+            messages.append("Circular part detected inside search area")
+        return ToolResult(
+            tool.id,
+            tool.name,
+            passed,
+            {
+                "detection_method": "rgb",
+                "center_x_px": round(float(detection.center_px[0]), 3),
+                "center_y_px": round(float(detection.center_px[1]), 3),
+                "radius_px": round(float(detection.radius_px), 3),
+                "diameter_px": round(float(diameter_px), 3),
+                "diameter_mm": round(float(diameter_mm), 3),
+                "radius_mm": round(float(radius_mm), 3),
+                "min_diameter_mm": tool.min_diameter_mm,
+                "max_diameter_mm": tool.max_diameter_mm,
+                "circle_fill_ratio": round(detection.fill_ratio, 4),
+                "circle_score": round(detection.circle_score, 3),
+                "search_x_px": float(detection.search_area_px[0]),
+                "search_y_px": float(detection.search_area_px[1]),
+                "search_width_px": float(detection.search_area_px[2]),
+                "search_height_px": float(detection.search_area_px[3]),
+                **_depth_height_measurements(
+                    depth,
+                    detection.bbox_px,
+                    detection.search_area_px,
+                    image.shape[:2],
+                    calibration,
+                ),
+            },
+            detection.bbox_px,
+            ["RGB circle detected", *messages],
         )
 
     def _inspect_ai_classifier(self, image: np.ndarray, tool: InspectionTool) -> ToolResult:
@@ -1650,6 +1716,111 @@ def detect_rectangle_in_roi(
         height_px=height_px,
         search_area_px=(x, y, w, h),
     )
+
+
+def detect_circle_in_roi(
+    image: np.ndarray,
+    roi: tuple[float, float, float, float],
+    min_score: float = 20.0,
+) -> CircleDetection | None:
+    """Find a circular foreground object inside a normalized search area."""
+    x, y, w, h = _roi_pixels(roi, image.shape[1], image.shape[0])
+    region = image[y:y + h, x:x + w]
+    gray = _gray(region)
+    if gray.size == 0:
+        return None
+
+    best: CircleDetection | None = None
+    best_score = 0.0
+    for mask in _part_candidate_masks(gray):
+        candidate = _best_circle_component(mask, max(12, int(min_score)))
+        if candidate is None:
+            continue
+        if candidate.circle_score > best_score:
+            best_score = candidate.circle_score
+            best = candidate
+    if best is None:
+        return None
+    cx, cy = best.center_px
+    bx0, by0, bx1, by1 = best.bbox_px
+    return CircleDetection(
+        center_px=(cx + x, cy + y),
+        radius_px=best.radius_px,
+        bbox_px=(bx0 + x, by0 + y, bx1 + x, by1 + y),
+        search_area_px=(x, y, w, h),
+        fill_ratio=best.fill_ratio,
+        circle_score=best.circle_score,
+    )
+
+
+def _best_circle_component(mask: np.ndarray, min_pixels: int) -> CircleDetection | None:
+    height, width = mask.shape
+    components = _merge_nearby_components(_connected_components(mask), mask.shape)
+    if not components:
+        return None
+
+    minimum_area = max(min_pixels, int(width * height * 0.002))
+    roi_center = np.array([width / 2.0, height / 2.0], dtype=np.float32)
+    roi_diag = max(1.0, float((width * width + height * height) ** 0.5))
+    best: CircleDetection | None = None
+    best_score = 0.0
+    for x0, y0, x1, y1, area in components:
+        if area < minimum_area:
+            continue
+        bbox_w = x1 - x0 + 1
+        bbox_h = y1 - y0 + 1
+        if bbox_w >= width * 0.95 and bbox_h >= height * 0.95:
+            continue
+        aspect = min(bbox_w, bbox_h) / max(1, max(bbox_w, bbox_h))
+        if aspect < 0.65:
+            continue
+        coverage = (bbox_w * bbox_h) / max(1, width * height)
+        if coverage > 0.85:
+            continue
+        component_mask = mask[y0:y1 + 1, x0:x1 + 1]
+        points_yx = np.argwhere(component_mask)
+        if points_yx.size == 0:
+            continue
+        center_x, center_y, radius = _fit_circle(points_yx, x0, y0)
+        if radius < 3.0:
+            continue
+        circle_area = np.pi * radius * radius
+        fill = area / max(1.0, circle_area)
+        if fill < 0.45 or fill > 1.35:
+            continue
+        circularity = min(fill, 1.0 / max(fill, 0.001)) * aspect
+        center = np.array([center_x, center_y], dtype=np.float32)
+        center_factor = 1.0 - min(0.75, float(np.linalg.norm(center - roi_center)) / roi_diag)
+        score = float(area * circularity * center_factor / max(1.0, coverage))
+        if score > best_score:
+            best_score = score
+            best = CircleDetection(
+                center_px=(float(center_x), float(center_y)),
+                radius_px=float(radius),
+                bbox_px=(x0, y0, x1, y1),
+                search_area_px=(0, 0, width, height),
+                fill_ratio=float(fill),
+                circle_score=score,
+            )
+    return best
+
+
+def _fit_circle(points_yx: np.ndarray, x_offset: int, y_offset: int) -> tuple[float, float, float]:
+    try:
+        import cv2
+
+        points_xy = points_yx[:, ::-1].astype(np.float32)
+        points_xy[:, 0] += x_offset
+        points_xy[:, 1] += y_offset
+        (center_x, center_y), radius = cv2.minEnclosingCircle(points_xy)
+        return float(center_x), float(center_y), float(radius)
+    except Exception:
+        ys = points_yx[:, 0].astype(np.float32) + y_offset
+        xs = points_yx[:, 1].astype(np.float32) + x_offset
+        center_x = float(np.mean(xs))
+        center_y = float(np.mean(ys))
+        radius = float(np.percentile(((xs - center_x) ** 2 + (ys - center_y) ** 2) ** 0.5, 95))
+        return center_x, center_y, radius
 
 
 def _rectangle_candidate_mask(gray: np.ndarray) -> np.ndarray:

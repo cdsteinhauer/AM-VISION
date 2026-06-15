@@ -156,7 +156,7 @@ def _ensure_astra_ros_driver() -> None:
         "set -e; "
         "source /opt/ros/humble/setup.bash; "
         f"if [ -f '{astra_ws}/install/setup.bash' ]; then source '{astra_ws}/install/setup.bash'; fi; "
-        "exec ros2 launch astra_camera astra.launch.py"
+        "exec ros2 launch astra_camera astra.launch.py enable_color:=false enable_colored_point_cloud:=false"
     )
     log_path = "/home/csteinhauer/robot_vision/data/logs/astra_camera.log"
     os.makedirs(os.path.dirname(log_path), exist_ok=True)

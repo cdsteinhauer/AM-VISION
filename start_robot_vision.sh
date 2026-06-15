@@ -149,7 +149,7 @@ if [[ "${CAMERA_PROVIDER}" == "ros_astra" || "${CAMERA_PROVIDER}" == "astra_ros"
   source /opt/ros/humble/setup.bash
   source "${ASTRA_WS}/install/setup.bash"
   set -u
-  nohup ros2 launch astra_camera astra.launch.py > "${ASTRA_LOG}" 2>&1 < /dev/null &
+  nohup ros2 launch astra_camera astra.launch.py enable_color:=false enable_colored_point_cloud:=false > "${ASTRA_LOG}" 2>&1 < /dev/null &
   astra_pid="$!"
   echo "Started Astra ROS PID ${astra_pid}"
 

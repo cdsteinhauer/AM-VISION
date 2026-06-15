@@ -107,6 +107,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     paths.ensure()
 
     camera_config = _resolve_auto_camera_config(cfg.camera)
+    if _camera_needs_astra_driver(camera_config):
+        _ensure_astra_ros_driver(cfg.data_dir)
     camera = create_camera(camera_config)
     camera_lock = Lock()
     recipes = RecipeStore(paths.recipes)
@@ -153,6 +155,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "camera_provider": camera_config.provider,
         }
 
+    @app.post("/api/app/restart")
+    def restart_app():
+        _restart_process_soon()
+        return {"restarting": True}
+
     @app.get("/api/camera/status")
     def camera_status():
         try:
@@ -187,6 +194,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     "provider": camera_config.provider,
                     "device_index": camera_config.device_index,
                     "depth_enabled": camera_config.depth_enabled,
+                    "restart_required": False,
                 }
             if payload.mode == "global_shutter":
                 device_index = select_camera_device_index("global_shutter", preferred_index)
@@ -245,6 +253,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                         "provider": camera_config.provider,
                         "device_index": camera_config.device_index,
                         "depth_enabled": camera_config.depth_enabled,
+                        "restart_required": True,
                     }
                 if _camera_needs_astra_driver(next_config):
                     _ensure_astra_ros_driver(cfg.data_dir)
@@ -262,6 +271,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "provider": camera_config.provider,
             "device_index": camera_config.device_index,
             "depth_enabled": camera_config.depth_enabled,
+            "restart_required": False,
         }
 
     @app.get("/api/camera/settings")
@@ -772,7 +782,7 @@ def _ensure_astra_ros_driver(data_dir: Path) -> None:
         "set -e; "
         "source /opt/ros/humble/setup.bash; "
         f"if [ -f '{astra_ws}/install/setup.bash' ]; then source '{astra_ws}/install/setup.bash'; fi; "
-        "exec ros2 launch astra_camera astra.launch.py"
+        "exec ros2 launch astra_camera astra.launch.py enable_color:=false enable_colored_point_cloud:=false"
     )
     with log_path.open("ab") as log_handle:
         subprocess.Popen(

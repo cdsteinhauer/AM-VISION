@@ -8,6 +8,7 @@ from robot_vision.inspection.calibration import CalibrationProfile, DepthReferen
 from robot_vision.inspection.engine import (
     InspectionEngine,
     debug_candidate_lines,
+    detect_circle_in_roi,
     detect_depth_rectangle_in_roi,
     detect_parallel_line_pair,
     detect_part_outline_in_roi,
@@ -149,6 +150,48 @@ def test_rectangle_measurement_uses_oriented_sides_for_rotated_part():
     assert 53 <= result.measurements["width_mm"] <= 59
     assert 25 <= result.measurements["height_mm"] <= 31
     assert result.measurements["width_mm"] > result.measurements["height_mm"]
+
+
+def test_circle_detection_measures_round_part_inside_search_area():
+    try:
+        import cv2
+    except Exception:
+        return
+    image = np.full((140, 180, 3), 45, dtype=np.uint8)
+    cv2.circle(image, (92, 72), 24, (210, 210, 210), -1)
+
+    detection = detect_circle_in_roi(image, (0.25, 0.2, 0.55, 0.65))
+
+    assert detection is not None
+    assert 90 <= detection.center_px[0] <= 94
+    assert 70 <= detection.center_px[1] <= 74
+    assert 23 <= detection.radius_px <= 25
+
+
+def test_circle_tool_reports_diameter_measurement():
+    try:
+        import cv2
+    except Exception:
+        return
+    image = np.full((140, 180, 3), 45, dtype=np.uint8)
+    cv2.circle(image, (92, 72), 24, (210, 210, 210), -1)
+    calibration = CalibrationProfile(pixels_per_mm_x=2.0, pixels_per_mm_y=2.0)
+    tool = InspectionTool.from_dict({
+        "id": "circle",
+        "name": "Circle check",
+        "type": "circle",
+        "roi": [0.25, 0.2, 0.55, 0.65],
+        "min_diameter_mm": 20,
+        "max_diameter_mm": 30,
+    })
+
+    result = InspectionEngine()._inspect_circle(image, tool, calibration)
+
+    assert result.passed is True
+    assert result.measurements["diameter_mm"] >= 23
+    assert result.measurements["diameter_mm"] <= 25
+    assert result.measurements["min_diameter_mm"] == 20.0
+    assert result.measurements["max_diameter_mm"] == 30.0
 
 
 def test_parallel_line_pair_detection_reports_average_length():

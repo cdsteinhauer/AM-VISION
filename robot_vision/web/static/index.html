@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Robot Vision</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260520-cycle-stats" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260615-camera-restart" />
   </head>
   <body>
     <header class="topbar">
@@ -34,6 +34,7 @@
             </div>
             <button id="snapButton">Snap</button>
             <button id="inspectButton" class="primary">Inspect</button>
+            <button id="restartAppButton">Restart App</button>
             <label class="toggle"><input id="autoSnap" type="checkbox" /> Auto</label>
             <label class="cycle-control">Cycle ms <input id="captureCycleMs" type="number" min="100" max="10000" step="100" value="1000" /></label>
             <div class="zoom-controls" aria-label="Image zoom">
@@ -84,6 +85,7 @@
           <h2>Tools</h2>
           <div id="toolList"></div>
           <button id="addRectangleTool">Add Rectangle Tool</button>
+          <button id="addCircleTool">Add Circle Tool</button>
           <button id="addEdgeOneTool">Add Edge Check 1 Edge</button>
           <button id="addEdgeTwoTool">Add Edge Check 2 Edge</button>
           <button id="addAiTool">Add AI Classifier Tool</button>
@@ -130,6 +132,7 @@
           <p class="help-text" id="cameraDeviceStatus">Camera device: automatic</p>
           <div class="field-row">
             <button id="applyCameraModeButton" class="primary">Apply Camera Mode</button>
+            <button id="restartAppButtonCamera">Restart App</button>
           </div>
           <p class="help-text" id="cameraModeStatus">Camera mode: loading...</p>
           <div id="cameraSettings" class="settings-list">Loading camera settings...</div>
@@ -192,6 +195,6 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=20260520-cycle-stats"></script>
+    <script src="/static/app.js?v=20260615-camera-restart"></script>
   </body>
 </html>

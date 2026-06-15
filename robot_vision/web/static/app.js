@@ -85,7 +85,9 @@ function toolMeasurementText(tool) {
   const name = tool.name || tool.tool_id || "Tool";
   const width = dimensionWithRange("W", measurements.width_mm, measurements.min_width_mm, measurements.max_width_mm);
   const height = dimensionWithRange("H", measurements.height_mm, measurements.min_height_mm, measurements.max_height_mm);
+  const diameter = dimensionWithRange("Dia", measurements.diameter_mm, measurements.min_diameter_mm, measurements.max_diameter_mm);
   const depthHeight = depthHeightText(measurements);
+  if (diameter) return `${name}: ${[diameter, depthHeight].filter(Boolean).join(", ")}`;
   if (width || height) return `${name}: ${[width, height, depthHeight].filter(Boolean).join(", ")}`;
   const averageLength = dimensionWithRange("Len", measurements.average_length_mm, measurements.min_length_mm, measurements.max_length_mm);
   if (averageLength) return `${name}: ${[averageLength, depthHeight].filter(Boolean).join(", ")}`;
@@ -151,9 +153,10 @@ function measurementSampleFromResult(result) {
     const sample = {
       w: measurementNumber(measurements.width_mm ?? measurements.outline_width_mm),
       h: measurementNumber(measurements.height_mm ?? measurements.outline_height_mm),
+      d: measurementNumber(measurements.diameter_mm),
       z: measurementNumber(measurements.depth_height_mm),
     };
-    if (sample.w !== null || sample.h !== null || sample.z !== null) return sample;
+    if (sample.w !== null || sample.h !== null || sample.d !== null || sample.z !== null) return sample;
   }
   return null;
 }
@@ -174,6 +177,7 @@ function updateMeasurementStatsDisplay() {
   target.textContent = `Rolling n=${state.measurementSamples.length}: ${[
     rollingMetricText("W", "w"),
     rollingMetricText("H", "h"),
+    rollingMetricText("Dia", "d"),
     rollingMetricText("Z", "z"),
   ].filter(Boolean).join(" | ")}`;
 }
@@ -301,11 +305,26 @@ async function applyCameraMode() {
   state.lastResultTools = [];
   state.lastSnapshot = null;
   drawOverlay([]);
+  if (data.restart_required) {
+    $("cameraModeStatus").textContent = `Camera mode: switching to ${cameraModeLabel(data.mode)}. Restarting app...`;
+    setStatus("healthStatus", "Service: restarting for camera switch");
+    setStatus("cameraStatus", `Camera: switching to ${data.provider}`);
+    setTimeout(() => window.location.reload(), 3500);
+    return;
+  }
   await refreshHealth();
   await loadCameraSettings();
   if (state.mode !== "snap") {
     startPreviewLoop(true);
   }
+}
+
+async function restartApp() {
+  stopPreviewLoop();
+  $("resultBox").textContent = "Restart requested. The page may disconnect for a moment.";
+  setStatus("healthStatus", "Service: restarting");
+  await api("/api/app/restart", { method: "POST", body: "{}" });
+  setTimeout(() => window.location.reload(), 2500);
 }
 
 function renderCameraModeStatus(data) {
@@ -475,7 +494,9 @@ function renderTools() {
     }
     const helpText = tool.type === "ai_classifier"
       ? "AI classifier compares PASS confidence against FAIL (or next-best class) and only passes when margin meets the minimum."
-      : "Search area: the app detects the rectangle inside this box, then measures the detected rectangle using calibration.";
+      : (tool.type === "circle"
+        ? "Search area: the app detects the circle inside this box, then measures diameter using calibration."
+        : "Search area: the app detects the rectangle inside this box, then measures the detected rectangle using calibration.");
     const card = document.createElement("div");
     card.className = "tool-card";
     card.innerHTML = `
@@ -489,6 +510,7 @@ function renderTools() {
       <label>Name <input data-tool="${index}" data-field="name" value="${tool.name}"></label>
       <label>Type <select data-tool="${index}" data-field="type">
         <option value="rectangle">rectangle</option>
+        <option value="circle">circle</option>
         <option value="edge_1">edge check 1 edge</option>
         <option value="edge_2">edge check 2 edge</option>
         <option value="ai_classifier">AI classifier</option>
@@ -508,6 +530,10 @@ function renderTools() {
         <label>Max W <input type="number" data-tool="${index}" data-field="max_width_mm" value="${tool.max_width_mm ?? ""}"></label>
         <label>Min H <input type="number" data-tool="${index}" data-field="min_height_mm" value="${tool.min_height_mm ?? ""}"></label>
         <label>Max H <input type="number" data-tool="${index}" data-field="max_height_mm" value="${tool.max_height_mm ?? ""}"></label>
+      </div>
+      <div class="tool-grid">
+        <label>Min Dia <input type="number" data-tool="${index}" data-field="min_diameter_mm" value="${tool.min_diameter_mm ?? ""}"></label>
+        <label>Max Dia <input type="number" data-tool="${index}" data-field="max_diameter_mm" value="${tool.max_diameter_mm ?? ""}"></label>
       </div>
       <div class="tool-grid">
         <label>Min Line <input type="number" data-tool="${index}" data-field="min_length_mm" value="${tool.min_length_mm ?? ""}"></label>
@@ -848,6 +874,24 @@ function drawOverlay(tools) {
       }
       ctx.stroke();
       ctx.fillText(tool.name, lineA[0] + 8, Math.max(24, lineA[1] - 10));
+      return;
+    }
+    const centerX = tool.measurements?.center_x_px;
+    const centerY = tool.measurements?.center_y_px;
+    const radius = tool.measurements?.radius_px;
+    if (centerX !== undefined && centerY !== undefined && radius !== undefined) {
+      ctx.strokeStyle = tool.passed ? "#159650" : "#cf342b";
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.beginPath();
+      ctx.arc(Number(centerX), Number(centerY), Number(radius), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(Number(centerX) - 8, Number(centerY));
+      ctx.lineTo(Number(centerX) + 8, Number(centerY));
+      ctx.moveTo(Number(centerX), Number(centerY) - 8);
+      ctx.lineTo(Number(centerX), Number(centerY) + 8);
+      ctx.stroke();
+      ctx.fillText(tool.name, Number(centerX) + Number(radius) + 8, Math.max(24, Number(centerY) - 10));
       return;
     }
     if (!tool.bbox_px) return;
@@ -1388,6 +1432,8 @@ function addTool(type) {
     max_width_mm: type === "rectangle" ? 1000 : null,
     min_height_mm: type === "rectangle" ? 20 : null,
     max_height_mm: type === "rectangle" ? 1000 : null,
+    min_diameter_mm: type === "circle" ? 20 : null,
+    max_diameter_mm: type === "circle" ? 1000 : null,
     min_edge_score: 25,
     min_length_mm: type === "edge_1" || type === "edge_2" ? 20 : null,
     max_length_mm: type === "edge_1" || type === "edge_2" ? 1000 : null,
@@ -1414,6 +1460,7 @@ async function saveTool(index) {
 }
 
 function toolDefaultName(type) {
+  if (type === "circle") return "Circle check";
   if (type === "edge_1") return "Edge check 1 edge";
   if (type === "edge_2") return "Edge check 2 edge";
   if (type === "ai_classifier") return "AI classifier";
@@ -1527,6 +1574,12 @@ $("overlayCanvas").addEventListener("wheel", (event) => {
 
 $("snapButton").addEventListener("click", snap);
 $("inspectButton").addEventListener("click", inspect);
+$("restartAppButton").addEventListener("click", () => restartApp().catch((error) => {
+  setStatus("healthStatus", `Restart failed: ${error.message}`);
+}));
+$("restartAppButtonCamera").addEventListener("click", () => restartApp().catch((error) => {
+  $("cameraModeStatus").textContent = `Restart failed: ${error.message}`;
+}));
 $("debugDetectButton").addEventListener("click", debugDetect);
 $("zoomOutButton").addEventListener("click", () => changeZoom(-0.25));
 $("zoomInButton").addEventListener("click", () => changeZoom(0.25));
@@ -1591,6 +1644,7 @@ $("deleteSamplesButton").addEventListener("click", () => deleteAllSamples().catc
 }));
 $("recipeSelect").addEventListener("change", (event) => loadRecipe(event.target.value));
 $("addRectangleTool").addEventListener("click", () => addTool("rectangle"));
+$("addCircleTool").addEventListener("click", () => addTool("circle"));
 $("addEdgeOneTool").addEventListener("click", () => addTool("edge_1"));
 $("addEdgeTwoTool").addEventListener("click", () => addTool("edge_2"));
 $("addAiTool").addEventListener("click", () => addTool("ai_classifier"));

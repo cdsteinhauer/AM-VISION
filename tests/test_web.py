@@ -101,6 +101,7 @@ def test_camera_mode_supports_orbbec_femto(tmp_path):
     assert data["provider"] == "orbbec"
     assert data["device_index"] == -1
     assert data["depth_enabled"] is True
+    assert data["restart_required"] is False
 
     current = client.get("/api/camera/mode")
     assert current.status_code == 200
@@ -138,6 +139,42 @@ def test_camera_mode_supports_astra_hybrid(tmp_path, monkeypatch):
     assert data["provider"] == "astra_hybrid"
     assert data["device_index"] == 2
     assert data["depth_enabled"] is True
+    assert data["restart_required"] is False
+
+
+def test_astra_config_starts_driver_before_camera_creation(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeCamera:
+        def status(self):
+            return {"provider": "astra_hybrid", "started": True}
+
+    def fake_ensure(data_dir):
+        calls.append(("ensure", data_dir))
+
+    def fake_create(config):
+        calls.append(("create", config.provider))
+        return FakeCamera()
+
+    monkeypatch.setattr("robot_vision.web.app._ensure_astra_ros_driver", fake_ensure)
+    monkeypatch.setattr("robot_vision.web.app.create_camera", fake_create)
+
+    TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(provider="astra_hybrid", device_index=2))))
+
+    assert calls[0] == ("ensure", tmp_path)
+    assert calls[1] == ("create", "astra_hybrid")
+
+
+def test_restart_app_endpoint_schedules_restart(tmp_path, monkeypatch):
+    restart_calls = []
+    monkeypatch.setattr("robot_vision.web.app._restart_process_soon", lambda: restart_calls.append(True))
+    client = TestClient(create_app(AppConfig(data_dir=tmp_path, camera=CameraConfig(width=640, height=360))))
+
+    response = client.post("/api/app/restart")
+
+    assert response.status_code == 200
+    assert response.json()["restarting"] is True
+    assert restart_calls == [True]
 
 
 def test_camera_mode_switch_from_astra_to_orbbec_schedules_restart(tmp_path, monkeypatch):
@@ -159,6 +196,7 @@ def test_camera_mode_switch_from_astra_to_orbbec_schedules_restart(tmp_path, mon
 
     assert response.status_code == 200
     assert response.json()["mode"] == "orbbec_femto"
+    assert response.json()["restart_required"] is True
     assert fake_camera.stop_calls == 1
     assert persist_calls == ["orbbec"]
     assert restart_calls == [True]
